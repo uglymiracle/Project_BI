@@ -1,0 +1,711 @@
+---
+title: "Project_BI"
+author: "Petrenko Kate"
+date: '2023-01-14'
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+if (!require("BiocManager", quietly = TRUE)) install.packages("BiocManager")
+if (!requireNamespace("dplyr", quietly = TRUE)) BiocManager::install("dplyr")
+library(dplyr)
+if (!requireNamespace("tidyr", quietly = TRUE)) BiocManager::install("tidyr")
+library(tidyr)
+if (!requireNamespace("ggplot2", quietly = TRUE)) BiocManager::install("ggplot2")
+library(ggplot2)
+if (!requireNamespace("ggbreak", quietly = TRUE)) BiocManager::install("ggbreak")
+library(ggbreak)
+if (!requireNamespace("stringr", quietly = TRUE)) BiocManager::install("stringr")
+library(stringr)
+if (!requireNamespace("data.table", quietly = TRUE)) BiocManager::install("data.table")
+library(data.table)
+if (!requireNamespace("readr", quietly = TRUE)) BiocManager::install("readr")
+library(readr)
+if (!requireNamespace("clusterProfiler", quietly = TRUE)) BiocManager::install("clusterProfiler")
+library(clusterProfiler)
+if (!requireNamespace("org.Sc.sgd.db", quietly = TRUE)) BiocManager::install("org.Sc.sgd.dbb")
+library(org.Sc.sgd.db)
+if (!requireNamespace("parallel", quietly = TRUE)) BiocManager::install("parallel")
+library(parallel)
+```
+
+# Pre-processing
+## Read data
+
+```{r}
+#PPI raw data
+biogrid <- read.csv('data/BIOGRID-ORGANISM-Saccharomyces_cerevisiae_S288c-4.4.217.tab3.txt', sep='\t') %>% 
+  as.data.table()
+
+#GI PSN
+costanzo <- read.csv('data/PSN/cc_ALL.txt', sep = '\t', skip = 1)
+
+#GI raw data
+SGA_ExE <- fread('../../Downloads/Data File S1. Raw genetic interaction datasets- Pair-wise interaction format/SGA_ExE.txt',sep = '\t') #df1
+SGA_ExN <- fread('../../Downloads/Data File S1. Raw genetic interaction datasets- Pair-wise interaction format/SGA_ExN_NxE.txt', sep='\t') #df2
+SGA_NxN <- fread('../../Downloads/Data File S1. Raw genetic interaction datasets- Pair-wise interaction format/SGA_NxN.txt', sep='\t', header = T) #df3
+```
+
+## Transformation of data table
+### GI PSN
+```{r}
+costanzo_gene_names <- costanzo[, c(1,2)]
+costanzo <- costanzo[-1]
+
+costanzo <- costanzo %>% 
+  gather(key = 'gene_B', value = 'Score', -X.1) %>% 
+  dplyr::filter(Score != 'NaN') %>% 
+  as.data.table()
+
+names(costanzo)[1] <- 'gene_A'
+
+head(costanzo)
+```
+
+### PPI
+```{r}
+ppi_stats <- biogrid %>% 
+  dplyr::filter(Experimental.System.Type == 'physical') %>% 
+  dplyr::count(Experimental.System)
+
+na_expsystem <- biogrid %>% 
+  group_by(Experimental.System) %>% 
+  summarise(non_na = sum(Score != '-')) %>% 
+  dplyr::filter(Experimental.System %in% ppi_stats$Experimental.System)
+
+ppi_stats <- merge(ppi_stats, na_expsystem) %>% 
+  mutate(non_na = non_na / n * 100)
+
+ppi_stats
+
+PPI <- biogrid %>% 
+  filter(Experimental.System.Type == 'physical') %>% 
+  unique()
+```
+
+### GI raw
+
+```{r}
+SGA <- bind_rows(SGA_ExE[,c(1,3,4,6,7)], SGA_ExN[,c(1,3,4,6,7)], SGA_NxN[,c(1,3,4,6,7)], .id = 'df') 
+
+SGA$`Query Strain ID` <- 
+  SGA$`Query Strain ID` %>% 
+  gsub('_.*', '', .)
+
+SGA$`Array Strain ID` <- 
+  SGA$`Array Strain ID` %>% 
+  gsub('_.*', '', .)
+
+names(SGA)[c(2,3)] <- c('Systematic.Name.Interactor.A', 'Systematic.Name.Interactor.B')
+
+head(SGA)
+```
+
+## Cutoff 
+### Score distribution in the GI (PSN)
+```{r}
+costanzo %>% 
+  ggplot(aes(Score)) +
+  geom_histogram(binwidth = 0.01, color='black', fill='lightblue') +
+  scale_x_continuous(breaks = seq(-1, 1, 0.2)) +
+  theme_bw()
+```
+
+## Cutoff for GI (PSN) = 0.2
+```{r}
+costanzo_02 <- costanzo %>% 
+  dplyr::filter(Score >= 0.2) %>% 
+  unique() %>% 
+  arrange(desc(Score))
+
+names(costanzo_02) <- c('Systematic.Name.Interactor.A', 'Systematic.Name.Interactor.B', 'Score')
+
+mask.dup <-
+  paste(costanzo_02$Systematic.Name.Interactor.A, costanzo_02$Systematic.Name.Interactor.B, sep = ',') %>%
+  str_split(',') %>% 
+  lapply(function(x) x %>% 
+           sort %>% 
+           paste(collapse = ',')) %>%
+  unlist %>%
+  duplicated
+sum(!mask.dup)
+
+nrow(costanzo_02)
+
+costanzo_02_uniq <- costanzo_02[!mask.dup,]
+```
+
+### Common patterns between GI (PSN, cutoff = 0.2) and PPI 
+```{r}
+common_GI_PPI_02 <- inner_join(costanzo_02, PPI[,c(6,7,12, 19)], 
+                               PPI[,c(6,7,12,19)] %>% 
+                                 dplyr::mutate(A = Systematic.Name.Interactor.B,
+                                               B = Systematic.Name.Interactor.A,
+                                               Systematic.Name.Interactor.A = A,
+                                               Systematic.Name.Interactor.B = B),   
+                                 by=c('Systematic.Name.Interactor.A', 
+                                      'Systematic.Name.Interactor.B')) %>% 
+  unique() %>%
+  dplyr::arrange(desc(Score.x))
+  
+mask.dup <-
+  paste(common_GI_PPI_02$Systematic.Name.Interactor.A, common_GI_PPI_02$Systematic.Name.Interactor.B, sep = ',') %>%
+  str_split(',') %>% 
+  lapply(function(x) x %>% 
+           sort %>% 
+           paste(collapse = ',')) %>%
+  unlist %>%
+  duplicated
+
+common_GI_PPI_02 <- common_GI_PPI_02[!mask.dup,]
+
+names(common_GI_PPI_02)[c(3, 5)] <- c('Score_GI', 'Score_PPI') 
+nrow(common_GI_PPI_02)
+```
+
+## Cutoff for GI (raw)
+
+```{r}
+SGA_intermediate_1 <- SGA %>% 
+  dplyr::filter(`Genetic interaction score (ε)` > 0.08 & `P-value` < 0.05) %>% 
+  unique() %>% 
+  arrange(desc(`Genetic interaction score (ε)`))
+
+SGA_intermediate_2 <- SGA %>% 
+  dplyr::filter(`Genetic interaction score (ε)` < -0.08 & `P-value` < 0.05) %>% 
+  unique() %>% 
+  arrange(`Genetic interaction score (ε)`)
+
+SGA_intermediate <- bind_rows(SGA_intermediate_1, SGA_intermediate_2) %>% 
+  unique()
+rm(SGA_intermediate_1, SGA_intermediate_2)
+
+SGA_stringent_1 <- SGA %>% 
+  dplyr::filter(`P-value` < 0.05 & `Genetic interaction score (ε)` > 0.16) %>% 
+  unique() %>% 
+  arrange(desc(`Genetic interaction score (ε)`))
+  
+SGA_stringent_2 <- SGA %>% 
+  dplyr::filter(`P-value` < 0.05 & `Genetic interaction score (ε)` < -0.12) %>% 
+  unique() %>% 
+  arrange(`Genetic interaction score (ε)`)
+
+SGA_stringent <- bind_rows(SGA_stringent_1, SGA_stringent_2) %>% 
+  unique()
+rm(SGA_stringent_1, SGA_stringent_2)
+
+SGA_intermediate[,2:3] %>% 
+  unique() %>% 
+  nrow()
+
+mask.dup <-
+  paste(SGA_intermediate$Systematic.Name.Interactor.A, SGA_intermediate$Systematic.Name.Interactor.B, sep = ',') %>%
+  str_split(',') %>% 
+  lapply(function(x) x %>% 
+           sort %>% 
+           paste(collapse = ',')) %>%
+  unlist %>%
+  duplicated
+sum(!mask.dup)
+
+SGA_stringent[,2:3] %>% 
+  unique() %>% 
+  nrow()
+
+mask.dup <-
+  paste(SGA_stringent$Systematic.Name.Interactor.A, SGA_stringent$Systematic.Name.Interactor.B, sep = ',') %>%
+  str_split(',') %>% 
+  lapply(function(x) x %>% 
+           sort %>% 
+           paste(collapse = ',')) %>%
+  unlist %>%
+  duplicated
+sum(!mask.dup)
+```
+
+### Common patterns between GI (raw, intermediate) and PPI
+
+```{r}
+common_GI_PPI_SGA_inter <- inner_join(SGA_intermediate, PPI[,c(6,7,12, 19)], by=c('Systematic.Name.Interactor.A', 'Systematic.Name.Interactor.B')) %>% 
+  unique()
+
+names(common_GI_PPI_SGA_inter)[8] <- 'Score_PPI' 
+
+mask.dup <-
+  paste(common_GI_PPI_SGA_inter$Systematic.Name.Interactor.A, common_GI_PPI_SGA_inter$Systematic.Name.Interactor.B, sep = ',') %>%
+  str_split(',') %>% 
+  lapply(function(x) x %>% 
+           sort %>% 
+           paste(collapse = ',')) %>%
+  unlist %>%
+  duplicated
+
+common_GI_PPI_SGA_inter <- common_GI_PPI_SGA_inter[!mask.dup,]
+```
+
+### Common patterns between GI (raw, stringent) and PPI
+
+```{r}
+common_GI_PPI_SGA_strong <- inner_join(SGA_stringent, PPI[,c(6,7,12, 19)], by=c('Systematic.Name.Interactor.A', 'Systematic.Name.Interactor.B')) %>% 
+  unique()
+names(common_GI_PPI_SGA_strong)[8] <- 'Score_PPI' 
+
+mask.dup <-
+  paste(common_GI_PPI_SGA_strong$Systematic.Name.Interactor.A, common_GI_PPI_SGA_strong$Systematic.Name.Interactor.B, sep = ',') %>%
+  str_split(',') %>% 
+  lapply(function(x) x %>% 
+           sort %>% 
+           paste(collapse = ',')) %>%
+  unlist %>%
+  duplicated
+
+common_GI_PPI_SGA_strong <- common_GI_PPI_SGA_strong[!mask.dup,]
+```
+
+# Gene-level table
+
+```{r}
+union_PSN_02 <- dplyr::union(costanzo_02[,c(1,2)], PPI[, c(6, 7)])
+
+mask.dup <-
+  paste(union_PSN_02$Systematic.Name.Interactor.A, union_PSN_02$Systematic.Name.Interactor.B, sep = ',') %>%
+  str_split(',') %>% 
+  lapply(function(x) x %>% 
+           sort %>% 
+           paste(collapse = ',')) %>%
+  unlist %>%
+  duplicated
+
+union_PSN_02 <- union_PSN_02[!mask.dup, ]
+
+union_SGA_inter <- dplyr::union(SGA_intermediate[,c(2,3)], PPI[, c(6, 7)])
+
+mask.dup <-
+  paste(union_SGA_inter$Systematic.Name.Interactor.A, union_SGA_inter$Systematic.Name.Interactor.B, sep = ',') %>%
+  str_split(',') %>% 
+  lapply(function(x) x %>% 
+           sort %>% 
+           paste(collapse = ',')) %>%
+  unlist %>%
+  duplicated
+
+union_SGA_inter <- union_SGA_inter[!mask.dup, ]
+```
+
+OI (intersection/smallest set size) 
+JI (intersection/union)
+
+```{r}
+gene_level <- unique(costanzo_gene_names$X.1)  %>%
+  as.data.table()
+  
+names(gene_level) <- 'Gene'
+
+gene_level <- gene_level  %>% 
+  mutate(OI_PSN_02 = sapply(Gene, function(x)
+                             ((sum(common_GI_PPI_02$Systematic.Name.Interactor.A == x) +
+                             sum(common_GI_PPI_02$Systematic.Name.Interactor.B == x)) / 
+                               (sum(PPI$Systematic.Name.Interactor.A == x) +
+                                  sum(PPI$Systematic.Name.Interactor.B  == x))))) %>% 
+  mutate(JI_PSN_02 = sapply(Gene, function(x)
+                             ((sum(common_GI_PPI_02$Systematic.Name.Interactor.A == x) +
+                             sum(common_GI_PPI_02$Systematic.Name.Interactor.B == x)) / 
+                               (sum(union_PSN_02$Systematic.Name.Interactor.A == x) +
+                                  sum(union_PSN_02$Systematic.Name.Interactor.B == x))))) %>% 
+  mutate(OI_SGA_inter = sapply(Gene, function(x)
+                             ((sum(common_GI_PPI_SGA_inter$Systematic.Name.Interactor.A == x) +
+                             sum(common_GI_PPI_SGA_inter$Systematic.Name.Interactor.B == x)) / 
+                               (sum(PPI$Systematic.Name.Interactor.A == x) +
+                                  sum(PPI$Systematic.Name.Interactor.B  == x))))) %>% 
+  mutate(JI_SGA_inter = sapply(Gene, function(x)
+                             ((sum(common_GI_PPI_SGA_inter$Systematic.Name.Interactor.A == x) +
+                             sum(common_GI_PPI_SGA_inter$Systematic.Name.Interactor.B == x)) / 
+                               (sum(union_SGA_inter$Systematic.Name.Interactor.A == x) +
+                                  sum(union_SGA_inter$Systematic.Name.Interactor.B == x)))))
+
+```
+
+## Visualisation of gene-level
+
+```{r, figures-side, fig.show="hold", out.width="50%"}
+
+ggplot(gene_level, aes(x=OI_PSN_02*100)) +
+  geom_histogram(binwidth = 1, color='#333233', fill='#9779c7', alpha=0.8) +
+  ggtitle("OI between PSN (cutofff = 0.2) and PPI") +
+  theme_light() +
+  theme(plot.title = element_text(size=15))
+
+gene_level %>% 
+  filter(OI_PSN_02 != 0) %>% 
+  ggplot( aes(x=OI_PSN_02*100)) +
+  geom_histogram(binwidth = 1, color='#333233', fill='#9779c7', alpha=0.8) +
+  ggtitle("OI between PSN (cutofff = 0.2) and PPI without 0") +
+  theme_light() +
+  theme(plot.title = element_text(size=15))
+
+ggplot(gene_level, aes(x=JI_PSN_02*100)) +
+  geom_histogram(binwidth = 1, color='#333233', fill='#9779c7', alpha=0.8) +
+  ggtitle("JI between PSN (cutofff = 0.2) and PPI") +
+  theme_light() +
+  theme(plot.title = element_text(size=15))
+
+gene_level %>% 
+  filter(JI_PSN_02 != 0) %>% 
+  ggplot( aes(x=JI_PSN_02*100)) +
+  geom_histogram(binwidth = 1, color='#333233', fill='#9779c7', alpha=0.8) +
+  ggtitle("JI between PSN (cutofff = 0.2) and PPI without 0") +
+  theme_light() +
+  theme(plot.title = element_text(size=15))
+
+ggplot(gene_level, aes(x=OI_SGA_inter*100)) +
+  geom_histogram(binwidth = 1, color='#333233', fill='#9779c7', alpha=0.8) +
+  ggtitle("OI between SGA (intermediate confidence) and PPI") +
+  theme_light() +
+  theme(plot.title = element_text(size=15))
+
+gene_level %>% 
+  dplyr::filter(OI_SGA_inter != 0) %>% 
+  ggplot( aes(x=OI_SGA_inter*100)) +
+  geom_histogram(binwidth = 1, color='#333233', fill='#9779c7', alpha=0.8) +
+  ggtitle("OI between SGA (intermediate confidence) and PPI without 0") +
+  theme_light() +
+  theme(plot.title = element_text(size=15))
+
+ggplot(gene_level, aes(x=JI_SGA_inter*100)) +
+  geom_histogram(binwidth = 1, color='#333233', fill='#9779c7', alpha=0.8) +
+  ggtitle("JI between SGA (intermediate confidence) and PPI") +
+  theme_light() +
+  theme(plot.title = element_text(size=15))
+
+gene_level %>% 
+  dplyr::filter(JI_SGA_inter != 0) %>% 
+  ggplot( aes(x=JI_SGA_inter*100)) +
+  geom_histogram(binwidth = 1, color='#333233', fill='#9779c7', alpha=0.8) +
+  ggtitle("JI between SGA (intermediate confidence) and PPI without 0") +
+  theme_light() +
+  theme(plot.title = element_text(size=15))
+```
+
+## Hex-plots to estimate the correlation between the number of interactions and JI
+### Pre-processing data
+```{r}
+PSN_02_JI_cor <- unique(costanzo_gene_names$X.1)  %>%
+  as.data.table()
+
+names(PSN_02_JI_cor) <- 'Gene'
+
+mask.dup <- paste(PPI$Systematic.Name.Interactor.A, PPI$Systematic.Name.Interactor.B, sep = ',') %>%
+  str_split(',') %>% 
+  lapply(function(x) x %>% 
+           sort %>% 
+           paste(collapse = ',')) %>%
+  unlist %>%
+  duplicated
+
+PPI_uniq <- PPI[!mask.dup, ]
+
+PSN_02_JI_cor <- PSN_02_JI_cor %>% 
+  mutate(JI = sapply(Gene, function(x)
+    ((sum(common_GI_PPI_02$Systematic.Name.Interactor.A == x) +
+        sum(common_GI_PPI_02$Systematic.Name.Interactor.B == x)) / 
+       (sum(union_PSN_02$Systematic.Name.Interactor.A == x) +
+          sum(union_PSN_02$Systematic.Name.Interactor.B == x))))) %>% 
+  mutate(PPI_n = sapply(Gene, function(x)
+    (sum(PPI_uniq$Systematic.Name.Interactor.A == x) + 
+       sum(PPI_uniq$Systematic.Name.Interactor.B == x)))) %>% 
+  mutate(GI_n = sapply(Gene, function(x)
+    (sum(costanzo_02_uniq$Systematic.Name.Interactor.A == x) + 
+       sum(costanzo_02_uniq$Systematic.Name.Interactor.B == x))))
+```
+
+### Plots
+
+```{r}
+ggplot(PSN_02_JI_cor, aes(x=JI, y=PPI_n) ) +
+  geom_hex() +
+  theme_light() 
+
+ggplot(PSN_02_JI_cor, aes(x=JI, y=GI_n) ) +
+  geom_hex() +
+  theme_light()
+```
+
+# Enrichment analysis
+lowest (Jaccard = 0 AND PPI_n >= 5 AND GI_n >= 5)
+```{r}
+annotate_data <- PSN_02_JI_cor %>% 
+  dplyr::arrange(desc(JI)) %>% 
+  dplyr::slice(1:100)
+
+annotate_data <- PSN_02_JI_cor %>% 
+  dplyr::filter(JI == 0) %>%
+  dplyr::filter(PPI_n >= 5) %>% 
+  dplyr::filter(GI_n >= 5) %>% 
+  rbind(annotate_data) %>% 
+  mutate(ENTREZID =  mapIds(org.Sc.sgd.db, 
+                            keys = Gene, 
+                            column = "ENTREZID", 
+                            keytype = "ORF"))
+
+annotate_data_highest<- annotate_data %>% 
+  dplyr::filter(JI != 0)
+ 
+annotate_data_lowest <- annotate_data %>% 
+  dplyr::filter(JI == 0) %>% 
+  dplyr::filter(PPI_n >= 23) %>% 
+  dplyr::filter(GI_n >= 23)
+
+annotate_data_23 <- PSN_02_JI_cor %>% 
+  dplyr::filter(PPI_n >= 23) %>% 
+  dplyr::filter(GI_n >= 23) %>% 
+  mutate(ENTREZID =  mapIds(org.Sc.sgd.db, 
+                            keys = Gene, 
+                            column = "ENTREZID", 
+                            keytype = "ORF")) 
+
+ego23 <- enrichGO(annotate_data$ENTREZID, org.Sc.sgd.db, ont = "ALL")
+  
+ego <- enrichGO(annotate_data$ENTREZID, org.Sc.sgd.db, ont = "ALL")
+
+ego_uni <- enrichGO(annotate_data_lowest$ENTREZID, org.Sc.sgd.db, 
+                    ont = "ALL", universe = annotate_data_23$ENTREZID)
+
+ego_highest <- enrichGO(annotate_data_highest$ENTREZID, org.Sc.sgd.db, ont = "ALL")
+
+ego_lowest <- enrichGO(annotate_data_lowest$ENTREZID, org.Sc.sgd.db, ont = "ALL")
+```
+
+```{r  out.width = "100%"}
+dotplot(ego_uni, split="ONTOLOGY", showCategory = 15, font.size = 8) + 
+  facet_grid(ONTOLOGY~., scale="free")
+
+barplot(ego_uni, showCategory = 15, font.size = 8)
+
+dotplot(ego23, showCategory = 15, font.size = 8)
+```
+
+## Plots for highest
+
+```{r out.width = "100%"}
+dotplot(ego_highest, split="ONTOLOGY", showCategory = 15) + 
+  facet_grid(ONTOLOGY~., scale="free") 
+
+barplot(ego_highest)
+```
+
+
+## Plots for lowest
+
+```{r out.width = "100%"}
+dotplot(ego_lowest, split="ONTOLOGY", showCategory = 15) + 
+  facet_grid(ONTOLOGY~., scale="free") 
+
+barplot(ego_lowest)
+```
+
+## Plots for top-100 genes by JI after filter n
+
+Try running enrichment analysis for genes with highest JI by first taking genes with (GI_n >= AND PPI_n >= some cutoff). After filtering by GI_n and PPI_n, take top-100 genes by JI and show their lowest JI value (i.e., JI for the gene ranked 100th);
+
+```{r}
+annotate_data_topgenes <- PSN_02_JI_cor %>% 
+  dplyr::filter(PPI_n >= 23) %>% 
+  dplyr::filter(GI_n >= 23) %>%
+  dplyr::arrange(desc(JI)) %>%
+  dplyr::slice(1:100) %>% 
+  mutate(ENTREZID =  mapIds(org.Sc.sgd.db, 
+                            keys = Gene, 
+                            column = "ENTREZID", 
+                            keytype = "ORF"))
+
+annotate_data_all <- PSN_02_JI_cor %>% 
+  mutate(ENTREZID =  mapIds(org.Sc.sgd.db, 
+                            keys = Gene, 
+                            column = "ENTREZID", 
+                            keytype = "ORF"))
+  
+
+ego_23 <- enrichGO(annotate_data_topgenes$ENTREZID, org.Sc.sgd.db, 
+                   ont = "ALL", universe = annotate_data_23$ENTREZID)
+
+ego_all <- enrichGO(annotate_data_topgenes$ENTREZID, org.Sc.sgd.db, 
+                    ont = "ALL", universe = annotate_data_all$ENTREZID)
+```
+
+plots for universe 23
+```{r}
+dotplot(ego_23, split="ONTOLOGY", showCategory = 15) + 
+  facet_grid(ONTOLOGY~., scale="free") 
+
+barplot(ego_23)
+```
+plots for universe all
+```{r}
+dotplot(ego_all, split="ONTOLOGY", showCategory = 15) + 
+  facet_grid(ONTOLOGY~., scale="free") 
+
+barplot(ego_all)
+```
+
+# Destribution of interaction number
+
+```{r}
+top100JI <- PSN_02_JI_cor %>% 
+      dplyr::arrange(desc(JI)) %>% 
+      dplyr::slice(1:100)
+
+destr_inter <- PSN_02_JI_cor %>% 
+  dplyr::arrange(desc(JI)) %>% 
+  dplyr::select(Gene, GI_n, PPI_n) %>%  
+  dplyr::mutate(GI_n_topJI = ifelse(
+    Gene %in% top100JI$Gene, GI_n, NA), 
+    PPI_n_topJI = ifelse(
+      Gene %in% top100JI$Gene, PPI_n, NA)
+    ) %>% 
+  pivot_longer(cols=c('GI_n', 'PPI_n', 
+                      'GI_n_topJI', 'PPI_n_topJI')) %>% 
+  dplyr::filter(value < 200) %>% 
+  dplyr::rename(n = value)
+  
+ggplot(destr_inter, aes(x=name, y=n)) +
+    geom_violin(width=1.4) +
+    geom_boxplot(width=0.1, alpha=0.2) +
+  theme_bw()
+```
+
+# PSN for PPI
+
+```{r}
+
+#JI calculation in PPI_uniq only
+#x - gene names after paste(sep = ',')
+ji_calc <- function(x) {
+  
+  a = str_split(x, ',')[[1]][1]
+  b = str_split(x, ',')[[1]][2]
+  
+  a_inter <- PPI_uniq %>% 
+    dplyr::select(Systematic.Name.Interactor.A,
+                  Systematic.Name.Interactor.B) %>% 
+    dplyr::filter(Systematic.Name.Interactor.A == a | 
+                  Systematic.Name.Interactor.B == a) %>% 
+    as.matrix() %>% 
+    as.vector() 
+  
+  a_inter <- a_inter[!a_inter == a]  
+  
+  b_inter <- PPI_uniq %>% 
+    dplyr::select(Systematic.Name.Interactor.A,
+                  Systematic.Name.Interactor.B) %>% 
+    dplyr::filter(Systematic.Name.Interactor.A == b | 
+                  Systematic.Name.Interactor.B == b) %>% 
+    as.matrix() %>% 
+    as.vector()
+  
+  b_inter <- b_inter[!b_inter == b]
+
+  length(intersect(a_inter, b_inter))/length(union(a_inter, b_inter))
+
+}
+
+ppi_ji <- PPI_uniq %>% 
+  dplyr::select(Systematic.Name.Interactor.A,
+                Systematic.Name.Interactor.B) %>%
+  dplyr::rename(Gene.A=Systematic.Name.Interactor.A,
+                Gene.B = Systematic.Name.Interactor.B) %>%  
+  dplyr::mutate(JI = mclapply(paste(Gene.A, Gene.B, sep = ','), 
+                              ji_calc, mc.cores = 4) %>% unlist)
+
+ppi_ji <- ppi_ji %>% 
+  dplyr::filter(Gene.A != Gene.B) %>% 
+  dplyr::mutate(JI=unlist(JI))
+
+n_calc <- function(x) {
+  
+      sum(PPI_uniq$Systematic.Name.Interactor.A == x | 
+          PPI_uniq$Systematic.Name.Interactor.B == x) 
+    
+}
+
+ppi_ji <- ppi_ji %>% 
+  dplyr::mutate(B.n = mclapply(Gene.B, n_calc, mc.cores = 4) %>% unlist,
+                A.n = mclapply(Gene.A, n_calc, mc.cores = 4) %>% unlist)
+  
+ppi_ji %>% 
+  pivot_longer(cols=c('A.n', 'B.n')) %>% 
+  ggplot(aes(x=name, y=value)) +
+    geom_violin(width=1.4) +
+    geom_boxplot(width=0.1, alpha=0.2) +
+  theme_bw()
+```
+
+
+## Density JI in PPI
+
+```{r}
+hist(ppi_ji$JI, labels = T, border = F, main = '', col=rgb(0.2,0.8,0.5,0.5))
+ppi_ji %>% 
+  ggplot(aes(x=JI)) +
+  geom_histogram(binwidth = 0.01, color='black', fill='lightblue') +
+  scale_y_log10() +
+  theme_bw()
+
+```
+
+## Common PPI PSN and GI PSN
+```{r}
+common_GI_PPI_PSN <- inner_join(costanzo_02, ppi_ji, by=c('Systematic.Name.Interactor.A', 'Systematic.Name.Interactor.B')) %>% 
+  unique() %>%
+  dplyr::arrange(desc(Score.x))
+
+mask.dup <-
+  paste(common_GI_PPI_PSN$Systematic.Name.Interactor.A, common_GI_PPI_PSN$Systematic.Name.Interactor.B, sep = ',') %>%
+  str_split(',') %>% 
+  lapply(function(x) x %>% 
+           sort %>% 
+           paste(collapse = ',')) %>%
+  unlist %>%
+  duplicated
+
+common_GI_PPI_PSN <- common_GI_PPI_PSN[!mask.dup,]
+
+names(common_GI_PPI_PSN)[c(3, 5)] <- c('Score_GI', 'Score_PPI') 
+nrow(common_GI_PPI_PSN)
+```
+
+## Enrichment 
+```{r}
+annotate_data <- PSN_02_JI_cor %>% 
+  dplyr::filter(PPI_n >= 23) %>% 
+  dplyr::filter(GI_n >= 23) %>% 
+  dplyr::arrange(desc(JI)) %>% 
+  dplyr::slice(1:100) %>% 
+  mutate(ENTREZID =  mapIds(org.Sc.sgd.db, 
+                            keys = Gene, 
+                            column = "ENTREZID", 
+                            keytype = "ORF"))
+
+annotate_data_uni <- PSN_02_JI_cor %>% 
+  mutate(ENTREZID =  mapIds(org.Sc.sgd.db, 
+                            keys = Gene, 
+                            column = "ENTREZID", 
+                            keytype = "ORF")) 
+
+ego <- enrichGO(annotate_data$ENTREZID, org.Sc.sgd.db, ont = "ALL", universe = annotate_data_uni$ENTREZID)
+
+dotplot(ego, split="ONTOLOGY", showCategory = 8, font.size=9) + 
+  facet_grid(ONTOLOGY~., scale="free") 
+
+barplot(ego)
+```
+```{r}
+ego <- enrichGO(annotate_data$ENTREZID, org.Sc.sgd.db, ont = "ALL", universe = annotate_data_23$ENTREZID)
+
+dotplot(ego, split="ONTOLOGY", showCategory = 8, font.size=9) + 
+  facet_grid(ONTOLOGY~., scale="free") 
+
+barplot(ego)
+```
+
