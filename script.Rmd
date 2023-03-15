@@ -46,6 +46,10 @@ costanzo <- read.csv('data/PSN/cc_ALL.txt', sep = '\t', skip = 1)
 SGA_ExE <- fread('../../Downloads/Data File S1. Raw genetic interaction datasets- Pair-wise interaction format/SGA_ExE.txt',sep = '\t') #df1
 SGA_ExN <- fread('../../Downloads/Data File S1. Raw genetic interaction datasets- Pair-wise interaction format/SGA_ExN_NxE.txt', sep='\t') #df2
 SGA_NxN <- fread('../../Downloads/Data File S1. Raw genetic interaction datasets- Pair-wise interaction format/SGA_NxN.txt', sep='\t', header = T) #df3
+
+#CX data
+CX <- read.csv('data/INT.CX.YeastNet.v3.5730gene.242504link.txt', sep='\t', header = F) %>% 
+  as.data.table()
 ```
 
 ## Transformation of data table
@@ -653,13 +657,26 @@ ppi_ji %>%
   theme_bw()
 
 ```
+## Cutoff
+```{r}
+ppi_ji_01 <- ppi_ji %>% 
+  dplyr::filter(JI >= 0.1) 
+
+names(ppi_ji_01)[c(1,2)] <- c('Systematic.Name.Interactor.A', 
+                              'Systematic.Name.Interactor.B')
+```
 
 ## Common PPI PSN and GI PSN
 ```{r}
-common_GI_PPI_PSN <- inner_join(costanzo_02, ppi_ji, by=c('Systematic.Name.Interactor.A', 'Systematic.Name.Interactor.B')) %>% 
-  unique() %>%
-  dplyr::arrange(desc(Score.x))
-
+common_GI_PPI_PSN <- inner_join(costanzo_02, ppi_ji_01, ppi_ji_01 %>% 
+                                 dplyr::mutate(A = Systematic.Name.Interactor.B,
+                                               B = Systematic.Name.Interactor.A,
+                                               Systematic.Name.Interactor.A = A,
+                                               Systematic.Name.Interactor.B = B),   
+                                 by=c('Systematic.Name.Interactor.A', 
+                                      'Systematic.Name.Interactor.B')) %>% 
+  unique() 
+  
 mask.dup <-
   paste(common_GI_PPI_PSN$Systematic.Name.Interactor.A, common_GI_PPI_PSN$Systematic.Name.Interactor.B, sep = ',') %>%
   str_split(',') %>% 
@@ -670,9 +687,6 @@ mask.dup <-
   duplicated
 
 common_GI_PPI_PSN <- common_GI_PPI_PSN[!mask.dup,]
-
-names(common_GI_PPI_PSN)[c(3, 5)] <- c('Score_GI', 'Score_PPI') 
-nrow(common_GI_PPI_PSN)
 ```
 
 ## Enrichment 
@@ -707,5 +721,119 @@ dotplot(ego, split="ONTOLOGY", showCategory = 8, font.size=9) +
   facet_grid(ONTOLOGY~., scale="free") 
 
 barplot(ego)
+```
+
+# CX
+## Overlap between GI, PPI and CX
+```{r}
+names(CX) <- c('Systematic.Name.Interactor.A', 'Systematic.Name.Interactor.B', 'Score')
+CX_GI.PSN <- inner_join(costanzo_02, CX, 
+                               CX %>% 
+                                 dplyr::mutate(A = Systematic.Name.Interactor.B,
+                                               B = Systematic.Name.Interactor.A,
+                                               Systematic.Name.Interactor.A = A,
+                                               Systematic.Name.Interactor.B = B),   
+                                 by=c('Systematic.Name.Interactor.A', 
+                                      'Systematic.Name.Interactor.B')) %>% 
+  unique() %>%
+  dplyr::arrange(desc(Score.x))
+
+CX_PPI <- inner_join(CX, PPI_uniq[,c(6,7,12, 19)], 
+                               PPI_uniq[,c(6,7,12,19)] %>% 
+                                 dplyr::mutate(A = Systematic.Name.Interactor.B,
+                                               B = Systematic.Name.Interactor.A,
+                                               Systematic.Name.Interactor.A = A,
+                                               Systematic.Name.Interactor.B = B),   
+                                 by=c('Systematic.Name.Interactor.A', 
+                                      'Systematic.Name.Interactor.B')) %>% 
+  unique() %>%
+  dplyr::arrange(desc(Score.x))
+
+CX_GI_PPI <- inner_join(CX_GI.PSN, CX_PPI, 
+                               CX_PPI %>% 
+                                 dplyr::mutate(A = Systematic.Name.Interactor.B,
+                                               B = Systematic.Name.Interactor.A,
+                                               Systematic.Name.Interactor.A = A,
+                                               Systematic.Name.Interactor.B = B),   
+                                 by=c('Systematic.Name.Interactor.A', 
+                                      'Systematic.Name.Interactor.B')) %>% 
+  unique() 
+```
+
+### JI
+```{r}
+union_CX_3netw <- dplyr::union(costanzo_02[,c(1,2)], PPI[, c(6, 7)]) %>% 
+  dplyr::union(CX[,c(1,2)])
+
+mask.dup <-
+  paste(union_CX_3netw$Systematic.Name.Interactor.A, 
+        union_CX_3netw$Systematic.Name.Interactor.B, sep = ',') %>%
+  str_split(',') %>% 
+  lapply(function(x) x %>% 
+           sort %>% 
+           paste(collapse = ',')) %>%
+  unlist %>%
+  duplicated
+
+union_CX_3netw <- union_CX_3netw[!mask.dup, ]
+
+
+
+CX_JI <- CX_GI_PPI[,1]  %>% 
+  rbind(CX_GI_PPI[,2], use.names = F) %>% 
+  unique() %>% 
+  mutate(OI = sapply(Systematic.Name.Interactor.A, function(x)
+                             ((sum(CX_GI_PPI$Systematic.Name.Interactor.A == x) +
+                             sum(CX_GI_PPI$Systematic.Name.Interactor.B == x)) / 
+                               (sum(PPI_uniq$Systematic.Name.Interactor.A == x) +
+                                  sum(PPI_uniq$Systematic.Name.Interactor.B  == x))))) %>% 
+  mutate(JI = sapply(Systematic.Name.Interactor.A, function(x)
+                             ((sum(CX_GI_PPI$Systematic.Name.Interactor.A == x) +
+                             sum(CX_GI_PPI$Systematic.Name.Interactor.B == x)) / 
+                               (sum(union_CX_3netw$Systematic.Name.Interactor.A == x) +
+                                  sum(union_CX_3netw$Systematic.Name.Interactor.B == x))))) 
+
+ggplot(CX_JI, aes(x=OI*100)) +
+  geom_histogram(binwidth = 1, color='#333233', fill='#9779c7', alpha=0.8) +
+  ggtitle("OI between 3 networks in %") +
+  theme_light() +
+  theme(plot.title = element_text(size=15))
+
+ggplot(CX_JI, aes(x=JI*100)) +
+  geom_histogram(binwidth = 1, color='#333233', fill='#9779c7', alpha=0.8) +
+  ggtitle("JI between 3 networks in %") +
+  theme_light() +
+  theme(plot.title = element_text(size=15))
+```
+## Enrichment
+```{r}
+annotate_3netw <- CX_JI
+names(annotate_3netw)[1] <- 'Gene'
+annotate_3netw <-
+  annotate_3netw %>% 
+  mutate(ENTREZID =  mapIds(org.Sc.sgd.db, 
+                            keys = Gene, 
+                            column = "ENTREZID", 
+                            keytype = "ORF")) 
+
+
+ego_3netw <- enrichGO(annotate_3netw$ENTREZID, 
+                      universe = annotate_data_all$ENTREZID, 
+                      org.Sc.sgd.db, ont = "ALL")
+
+dotplot(ego_3netw, split="ONTOLOGY", showCategory = 8) + 
+  facet_grid(ONTOLOGY~., scale="free") 
+
+barplot(ego_3netw)
+```
+
+```{r}
+ego_3netw <- enrichGO(annotate_3netw$ENTREZID, 
+                      org.Sc.sgd.db, ont = "ALL")
+
+dotplot(ego_3netw, split="ONTOLOGY", showCategory = 7) + 
+  facet_grid(ONTOLOGY~., scale="free") 
+
+barplot(ego_3netw)
 ```
 
