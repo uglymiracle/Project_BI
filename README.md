@@ -51,7 +51,7 @@ The results of the enrichment analysis for human genes were similar. However, in
 
 We also performed a similar analysis on data from the GeneMANIA database, which includes the results of a large number of studies, in addition to data from screening studies. As a result, we obtained 13569 common interactions for humans, represented by 6814 genes, and 22141 common interactions for yeast, involving 4190 genes. Enrichment analysis on these networks led to the same results, which further confirms our conclusions.
 
-![intersection_gm](images/intersections_GM.png)
+![intersection_gm](images/intersections_gm.png)
 
 In conclusion, the processes that sustain a living cell and are necessary for survival require coordinated work on all three layers for both single-celled and multicellular organisms.
 
