@@ -1,0 +1,1395 @@
+---
+title: "Project_BI"
+author: "Petrenko Kate"
+date: '2023-01-14'
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+if (!require("BiocManager", quietly = TRUE)) install.packages("BiocManager")
+if (!requireNamespace("dplyr", quietly = TRUE)) BiocManager::install("dplyr")
+library(dplyr)
+if (!requireNamespace("tidyr", quietly = TRUE)) BiocManager::install("tidyr")
+library(tidyr)
+if (!requireNamespace("ggplot2", quietly = TRUE)) BiocManager::install("ggplot2")
+library(ggplot2)
+if (!requireNamespace("ggbreak", quietly = TRUE)) BiocManager::install("ggbreak")
+library(ggbreak)
+if (!requireNamespace("stringr", quietly = TRUE)) BiocManager::install("stringr")
+library(stringr)
+if (!requireNamespace("data.table", quietly = TRUE)) BiocManager::install("data.table")
+library(data.table)
+if (!requireNamespace("readr", quietly = TRUE)) BiocManager::install("readr")
+library(readr)
+if (!requireNamespace("clusterProfiler", quietly = TRUE)) BiocManager::install("clusterProfiler")
+library(clusterProfiler)
+if (!requireNamespace("org.Sc.sgd.db", quietly = TRUE)) BiocManager::install("org.Sc.sgd.dbb")
+library(org.Sc.sgd.db)
+if (!requireNamespace("parallel", quietly = TRUE)) BiocManager::install("parallel")
+library(parallel)
+if (!requireNamespace("igraph", quietly = TRUE)) BiocManager::install("igraph")
+library(igraph)
+if (!requireNamespace("org.Hs.eg.db", quietly = TRUE)) BiocManager::install("org.Hs.eg.db")
+library(org.Hs.eg.db)
+if (!requireNamespace("collapse", quietly = TRUE)) install.packages("collapse")
+library(collapse)
+if (!requireNamespace("depmap", quietly = TRUE)) BiocManager::install("depmap")
+library(depmap)
+```
+
+
+```{r}
+###################################################################################
+WORKDIR <- '~/Desktop/networks/'
+
+###################################################################################
+```
+
+# Functions
+```{r}
+#removes duplicate interactions regardless of the column arrangement
+remove_duplicate <- function(table) {
+  
+  mask.dup <-
+    paste(table$ENTREZID_1,
+          table$ENTREZID_2, sep = ',') %>%
+    str_split(',') %>% 
+    lapply(function(x) x %>% 
+           sort %>% 
+           paste(collapse = ',')) %>% 
+    unlist %>%
+    duplicated
+  
+  return(table[!mask.dup,])
+}
+
+```
+
+# Downloading data
+## Yeast
+```{r}
+dir.create(paste0(WORKDIR, 'data'))
+setwd(WORKDIR)
+
+#biogrid data
+system('wget https://downloads.thebiogrid.org/Download/BioGRID/Release-Archive/BIOGRID-4.4.217/BIOGRID-ORGANISM-4.4.217.tab3.zip')
+system('unzip -d biogrid BIOGRID-ORGANISM-4.4.217.tab3.zip')
+system('mv biogrid/BIOGRID-ORGANISM-Saccharomyces_cerevisiae_S288c-4.4.217.tab3.txt data/')
+system('mv biogrid/BIOGRID-ORGANISM-Homo_sapiens-4.4.217.tab3.txt data/')
+system('rm -r biogrid')
+system('rm BIOGRID-ORGANISM-4.4.217.tab3.zip')
+
+biogrid <- read.csv('data/BIOGRID-ORGANISM-Saccharomyces_cerevisiae_S288c-4.4.217.tab3.txt', sep='\t') %>% 
+  as.data.table()
+
+#GI PSN yeast
+system('wget -cO - https://thecellmap.org/costanzo2016/data_files/Genetic%20interaction%20profile%20similarity%20matrices.zip > psn.zip')
+system('unzip psn.zip')
+system('mv "Data\ File\ S3.\ Genetic\ interaction\ profile\ similarity\ matrices/cc_ALL.txt" data')
+system('rm -r "Data\ File\ S3.\ Genetic\ interaction\ profile\ similarity\ matrices/"')
+
+costanzo <- read.csv('data/PSN/cc_ALL.txt', sep = '\t', skip = 1)
+
+#GI raw data yeast
+system('wget https://thecellmap.org/costanzo2016/data_files/Raw%20genetic%20interaction%20datasets:%20Pair-wise%20interaction%20format.zip')
+system('unzip "Raw genetic interaction datasets: Pair-wise interaction format.zip"')
+system('mv "Data File S1. Raw genetic interaction datasets: Pair-wise interaction format/SGA_ExE.txt" data/')
+system('mv "Data File S1. Raw genetic interaction datasets: Pair-wise interaction format/SGA_ExN_NxE.txt" data/')
+system('mv "Data File S1. Raw genetic interaction datasets: Pair-wise interaction format/SGA_NxN.txt" data/')
+system('rm -r "Data File S1. Raw genetic interaction datasets: Pair-wise interaction format/"')
+
+SGA_ExE <- fread('data/SGA_ExE.txt',sep = '\t') #df1
+SGA_ExN <- fread('data/SGA_ExN_NxE.txt', sep='\t') #df2
+SGA_NxN <- fread('data/SGA_NxN.txt', sep='\t', header = T) #df3
+
+#CX data yeast
+system('wget "https://www.inetbio.org/yeastnet/download.php?type=3&name=INT.CX.YeastNet.v3.5730gene.242504link.txt" -O data/CX.YeastNet.txt')
+CX <- read.csv('data/CX.YeastNet.txt', sep='\t', header = F) %>% 
+  as.data.table() 
+```
+
+## Human
+```{r}
+#ppi
+human_ppi_biogrid <- fread('data/BIOGRID-ORGANISM-Homo_sapiens-4.4.217.tab3.txt', sep='\t')
+
+#gi
+setwd('data/')
+system('wget https://staging2.inetbio.org/humannetv3/networks/HS-GI.tsv')
+setwd(WORKDIR)
+human_gi_net <- fread('data/HS-GI.tsv', sep = "\t")
+
+#cx from genemania
+```
+
+# GeneMANIA data
+## Human
+```{r}
+setwd('data')
+system('wget -r -np -nH http://genemania.org/data/current/Homo_sapiens/')
+
+#GI
+# Get list of files
+file_list <- list.files(path = 'data/current/Homo_sapiens/', pattern = "^Genetic_Interactions.*\\.txt$")
+
+# Loop over files and read into data frame
+human_gi <- NULL
+for (file in file_list) {
+  human_gi <-
+    fread(paste0('data/current/Homo_sapiens/', file), header = TRUE, sep = "\t", fill = TRUE) %>%
+    fsubset(!paste0(Gene_A, Gene_B) %in% c(paste0(human_gi$Gene_A, human_gi$Gene_B),
+                                           paste0(human_gi$Gene_B, human_gi$Gene_A))) %>%
+    rbind(human_gi, .)
+}
+
+#PPI
+# Get list of files
+file_list <- list.files(path = 'data/current/Homo_sapiens/', pattern = "^Physical_Interactions.*\\.txt$")
+
+# Loop over files and read into data frame and remove duplicate
+human_ppi <- NULL
+for (file in file_list) {
+  human_ppi <-
+    fread(paste0('data/current/Homo_sapiens/', file), header = TRUE, sep = "\t", fill = TRUE) %>%
+    fsubset(!paste0(Gene_A, Gene_B) %in% c(paste0(human_ppi$Gene_A, human_ppi$Gene_B),
+                                           paste0(human_ppi$Gene_B, human_ppi$Gene_A))) %>%
+    rbind(human_ppi, .)
+}
+
+#CX
+# Get list of files
+file_list <- list.files(path = 'data/current/Homo_sapiens/', pattern = "^Co-expression.*\\.txt$")
+
+# Loop over files and read into data frame
+human_cx <- NULL
+for (file in file_list) {
+  human_cx <-
+    fread(paste0('data/current/Homo_sapiens/', file), header = TRUE, sep = "\t", fill = TRUE) %>%
+    fsubset(!paste0(Gene_A, Gene_B) %in% c(paste0(human_cx$Gene_A, human_cx$Gene_B),
+                                           paste0(human_cx$Gene_B, human_cx$Gene_A))) %>%
+    rbind(human_cx, .)
+}
+
+setwd(WORKDIR)
+```
+
+## Yeast
+```{r}
+setwd('data')
+system('wget -r -np -nH http://genemania.org/data/current/Saccharomyces_cerevisiae/')
+
+
+## S. cerevisiae
+# Get list of files
+file_list <- list.files(path = 'data/current/Saccharomyces_cerevisiae/', pattern = "^Co-expression.*\\.txt$")
+
+# Loop over files and read into data frame
+yeast_cx <- NULL
+for (file in file_list) {
+  yeast_cx <-
+    fread(paste0('data/current/Saccharomyces_cerevisiae/', file), header = TRUE, sep = "\t", fill = TRUE) %>%
+    fsubset(!paste0(Gene_A, Gene_B) %in% c(paste0(yeast_cx$Gene_A, yeast_cx$Gene_B),
+                                                     paste0(yeast_cx$Gene_B, yeast_cx$Gene_A))) %>%
+    rbind(yeast_cx, .)
+}
+
+ # Get list of files
+file_list <- list.files(path = 'data/current/Saccharomyces_cerevisiae/', pattern = "^Genetic_Interactions.*\\.txt$")
+
+# Loop over files and read into data frame
+yeast_gi <- NULL
+for (file in file_list) {
+  yeast_gi <-
+    fread(paste0('data/current/Saccharomyces_cerevisiae/', file), header = TRUE, sep = "\t", fill = TRUE) %>%
+    fsubset(!paste0(Gene_A, Gene_B) %in% c(paste0(yeast_gi$Gene_A, yeast_gi$Gene_B),
+                                           paste0(yeast_gi$Gene_B, yeast_gi$Gene_A))) %>%
+    rbind(yeast_gi, .)
+}
+
+# Get list of files
+file_list <- list.files(path = 'data/current/Saccharomyces_cerevisiae/', pattern = "^Physical_Interactions.*\\.txt$")
+
+# Loop over files and read into data frame
+yeast_ppi <- NULL
+for (file in file_list) {
+  yeast_ppi <-
+    fread(paste0('data/current/Saccharomyces_cerevisiae/', file), header = TRUE, sep = "\t", fill = TRUE) %>%
+    fsubset(!paste0(Gene_A, Gene_B) %in% c(paste0(yeast_ppi$Gene_A, yeast_ppi$Gene_B),
+                                           paste0(yeast_ppi$Gene_B, yeast_ppi$Gene_A))) %>%
+    rbind(yeast_ppi, .)
+}
+
+setwd(WORKDIR)
+```
+
+# Pre-processing - Yeast
+## GI PSN
+```{r}
+costanzo_gene_names <- costanzo[, 2] %>% 
+  as.data.table() %>% 
+  dplyr::mutate(ENTREZID =  mapIds(org.Sc.sgd.db, 
+                            keys = ., 
+                            column = "ENTREZID", 
+                            keytype = "ORF")) %>% 
+  dplyr::select(ENTREZID) %>% 
+  drop_na()
+                  
+costanzo <- costanzo[-1]
+
+#matrix to 3-column table
+costanzo <- costanzo %>% 
+  gather(key = 'gene_B', value = 'Score', -X.1) %>% 
+  dplyr::filter(Score != 'NaN') %>% 
+  as.data.table()
+
+names(costanzo)[1] <- 'gene_A'
+
+#gene name to ENTREZID
+costanzo <- costanzo %>% 
+  dplyr::mutate(ENTREZID_1 =  mapIds(org.Sc.sgd.db, 
+                            keys = gene_A, 
+                            column = "ENTREZID", 
+                            keytype = "ORF"),
+         ENTREZID_2 =  mapIds(org.Sc.sgd.db, 
+                            keys = gene_B, 
+                            column = "ENTREZID", 
+                            keytype = "ORF")) %>% 
+  dplyr::select(ENTREZID_1, ENTREZID_2, Score) %>% 
+  drop_na()
+
+CX <- CX %>% 
+  dplyr::mutate(ENTREZID_1 =  mapIds(org.Sc.sgd.db, 
+                            keys = V1, 
+                            column = "ENTREZID", 
+                            keytype = "ORF"),
+                ENTREZID_2 =  mapIds(org.Sc.sgd.db, 
+                            keys = V2, 
+                            column = "ENTREZID", 
+                            keytype = "ORF")) %>% 
+  dplyr::select(ENTREZID_1, ENTREZID_2, V3)
+                  
+names(CX)[3] <- 'Score'
+```
+
+## PPI
+```{r}
+# statistics of ppi network
+# type of exp system
+ppi_stats <- biogrid %>% 
+  dplyr::filter(Experimental.System.Type == 'physical') %>% 
+  dplyr::count(Experimental.System)
+# na count by exp type
+na_expsystem <- biogrid %>% 
+  group_by(Experimental.System) %>% 
+  summarise(non_na = sum(Score != '-')) %>% 
+  dplyr::filter(Experimental.System %in% ppi_stats$Experimental.System)
+
+ppi_stats <- merge(ppi_stats, na_expsystem) %>% 
+  mutate(non_na = non_na / n * 100)
+
+
+PPI <- biogrid %>% 
+  filter(Experimental.System.Type == 'physical') %>% 
+  mutate(ENTREZID_1 = Entrez.Gene.Interactor.A,
+         ENTREZID_2 = Entrez.Gene.Interactor.B) %>% 
+  dplyr::select(ENTREZID_1, ENTREZID_2) 
+
+PPI <- remove_duplicate(PPI)
+```
+
+## GI raw
+```{r}
+SGA <- bind_rows(SGA_ExE[,c(1,3,6,7)], SGA_ExN[,c(1,3,6,7)], SGA_NxN[,c(1,3,6,7)], .id = 'df') 
+
+#get only gene rom strain name
+SGA$`Query Strain ID` <- 
+  SGA$`Query Strain ID` %>% 
+  gsub('_.*', '', .)
+
+SGA$`Array Strain ID` <- 
+  SGA$`Array Strain ID` %>% 
+  gsub('_.*', '', .)
+
+names(SGA)[c(2,3,4,5)] <- c('gene_A', 'gene_B', 'GI_score', 'pvalue')
+
+#gene name to ENTREZID
+SGA <- SGA %>% 
+  dplyr::mutate(ENTREZID_1 =  mapIds(org.Sc.sgd.db, 
+                            keys = gene_A, 
+                            column = "ENTREZID", 
+                            keytype = "ORF"),
+                ENTREZID_2 =  mapIds(org.Sc.sgd.db, 
+                            keys = gene_B, 
+                            column = "ENTREZID", 
+                            keytype = "ORF")) %>%
+  dplyr::select(ENTREZID_1, ENTREZID_2, GI_score, pvalue) 
+```
+
+## Cutoff for GI
+### Score distribution in the GI (PSN)
+```{r}
+costanzo %>% 
+  ggplot(aes(Score)) +
+  geom_histogram(binwidth = 0.01, color='black', fill='lightblue') +
+  scale_x_continuous(breaks = seq(-1, 1, 0.2)) +
+  theme_bw()
+```
+
+### Cutoff for GI (PSN) = 0.2
+all cutoff from article Costanzo, 2016
+```{r}
+costanzo_02 <- costanzo %>% 
+  dplyr::filter(Score >= 0.2) %>% 
+  arrange(desc(Score))
+
+costanzo_02 <- remove_duplicate(costanzo_02)
+```
+
+#### Common patterns between GI (PSN, cutoff = 0.2) and PPI 
+```{r}
+common_GI_PPI_02 <- inner_join(costanzo_02, PPI, PPI %>% 
+                                 dplyr::mutate(A = ENTREZID_2,
+                                               B = ENTREZID_1,
+                                               ENTREZID_1 = A,
+                                               ENTREZID_2 = B),   
+                                 by=c('ENTREZID_1', 
+                                      'ENTREZID_2')) %>% 
+  dplyr::arrange(desc(Score))
+  
+common_GI_PPI_02 <- remove_duplicate(common_GI_PPI_02)
+```
+
+### Cutoff for GI (raw)
+```{r}
+#intermediate cutoff
+SGA_intermediate_1 <- SGA %>% 
+  dplyr::filter(GI_score > 0.08 & pvalue < 0.05) %>% 
+  arrange(desc(GI_score))
+
+SGA_intermediate_2 <- SGA %>% 
+  dplyr::filter(GI_score < -0.08 & pvalue < 0.05) %>% 
+  arrange(GI_score)
+
+SGA_intermediate <- bind_rows(SGA_intermediate_1, SGA_intermediate_2) 
+rm(SGA_intermediate_1, SGA_intermediate_2)
+
+#stringent cutoff
+SGA_stringent_1 <- SGA %>% 
+  dplyr::filter(pvalue < 0.05 & GI_score > 0.16) %>% 
+  arrange(desc(GI_score))
+  
+SGA_stringent_2 <- SGA %>% 
+  dplyr::filter(pvalue < 0.05 & GI_score < -0.12) %>% 
+  arrange(GI_score)
+
+SGA_stringent <- bind_rows(SGA_stringent_1, SGA_stringent_2) 
+rm(SGA_stringent_1, SGA_stringent_2)
+
+SGA_intermediate <- remove_duplicate(SGA_intermediate)
+SGA_stringent <- remove_duplicate(SGA_stringent)
+```
+
+#### Common patterns between GI (raw, intermediate) and PPI
+```{r}
+common_GI_PPI_SGA_inter <- inner_join(SGA_intermediate, PPI, 
+                                      by=c('ENTREZID_1', 'ENTREZID_2'))
+
+common_GI_PPI_SGA_inter <- remove_duplicate(common_GI_PPI_SGA_inter)
+```
+
+#### Common patterns between GI (raw, stringent) and PPI
+```{r}
+common_GI_PPI_SGA_strong <- inner_join(SGA_stringent, PPI, by=c('ENTREZID_1', 'ENTREZID_2')) 
+
+common_GI_PPI_SGA_strong <- remove_duplicate(common_GI_PPI_SGA_strong)
+```
+
+# Gene-level table
+stats - OI, JI for raw data and PSN
+```{r}
+union_PSN_02 <- dplyr::union(costanzo_02[,c(1,2)], PPI)
+union_PSN_02 <- remove_duplicate(union_PSN_02)
+
+union_SGA_inter <- dplyr::union(SGA_intermediate[,c(1,2)], PPI)
+union_SGA_inter <- remove_duplicate(union_SGA_inter) %>% 
+  drop_na()
+```
+
+OI (intersection/smallest set size) 
+JI (intersection/union)
+
+```{r}
+gene_level <- unique(costanzo_gene_names$ENTREZID)  %>%
+  as.data.table()
+  
+names(gene_level) <- 'Gene'
+
+gene_level <- gene_level  %>% 
+  mutate(OI_PSN_02 = sapply(Gene, function(x)
+                             ((sum(common_GI_PPI_02$ENTREZID_1 == x) +
+                             sum(common_GI_PPI_02$ENTREZID_2 == x)) / 
+                               (sum(PPI$ENTREZID_1 == x) +
+                                  sum(PPI$ENTREZID_2 == x))))) %>% 
+  mutate(JI_PSN_02 = sapply(Gene, function(x)
+                             ((sum(common_GI_PPI_02$ENTREZID_1 == x) +
+                             sum(common_GI_PPI_02$ENTREZID_2 == x)) / 
+                               (sum(union_PSN_02$ENTREZID_1 == x) +
+                                  sum(union_PSN_02$ENTREZID_2 == x))))) %>% 
+  mutate(OI_SGA_inter = sapply(Gene, function(x)
+                             ((sum(common_GI_PPI_SGA_inter$ENTREZID_1 == x) +
+                             sum(common_GI_PPI_SGA_inter$ENTREZID_2 == x)) / 
+                               (sum(PPI$ENTREZID_1 == x) +
+                                  sum(PPI$ENTREZID_2  == x))))) %>% 
+  mutate(JI_SGA_inter = sapply(Gene, function(x)
+                             ((sum(common_GI_PPI_SGA_inter$ENTREZID_1 == x) +
+                             sum(common_GI_PPI_SGA_inter$ENTREZID_2 == x)) / 
+                               (sum(union_SGA_inter$ENTREZID_1 == x) +
+                                  sum(union_SGA_inter$ENTREZID_2 == x)))))
+
+```
+
+## Visualisation of gene-level
+
+```{r, figures-side, fig.show="hold", out.width="50%"}
+
+ggplot(gene_level, aes(x=OI_PSN_02*100)) +
+  geom_histogram(binwidth = 1, color='#333233', fill='#9779c7', alpha=0.8) +
+  ggtitle("OI between PSN (cutofff = 0.2) and PPI") +
+  theme_light() +
+  theme(plot.title = element_text(size=15))
+
+gene_level %>% 
+  filter(OI_PSN_02 != 0) %>% 
+  ggplot( aes(x=OI_PSN_02*100)) +
+  geom_histogram(binwidth = 1, color='#333233', fill='#9779c7', alpha=0.8) +
+  ggtitle("OI between PSN (cutofff = 0.2) and PPI without 0") +
+  theme_light() +
+  theme(plot.title = element_text(size=15))
+
+ggplot(gene_level, aes(x=JI_PSN_02*100)) +
+  geom_histogram(binwidth = 1, color='#333233', fill='#9779c7', alpha=0.8) +
+  ggtitle("JI between PSN (cutofff = 0.2) and PPI") +
+  theme_light() +
+  theme(plot.title = element_text(size=15))
+
+gene_level %>% 
+  filter(JI_PSN_02 != 0) %>% 
+  ggplot( aes(x=JI_PSN_02*100)) +
+  geom_histogram(binwidth = 1, color='#333233', fill='#9779c7', alpha=0.8) +
+  ggtitle("JI between PSN (cutofff = 0.2) and PPI without 0") +
+  theme_light() +
+  theme(plot.title = element_text(size=15))
+
+ggplot(gene_level, aes(x=OI_SGA_inter*100)) +
+  geom_histogram(binwidth = 1, color='#333233', fill='#9779c7', alpha=0.8) +
+  ggtitle("OI between SGA (intermediate confidence) and PPI") +
+  theme_light() +
+  theme(plot.title = element_text(size=15))
+
+gene_level %>% 
+  dplyr::filter(OI_SGA_inter != 0) %>% 
+  ggplot( aes(x=OI_SGA_inter*100)) +
+  geom_histogram(binwidth = 1, color='#333233', fill='#9779c7', alpha=0.8) +
+  ggtitle("OI between SGA (intermediate confidence) and PPI without 0") +
+  theme_light() +
+  theme(plot.title = element_text(size=15))
+
+ggplot(gene_level, aes(x=JI_SGA_inter*100)) +
+  geom_histogram(binwidth = 1, color='#333233', fill='#9779c7', alpha=0.8) +
+  ggtitle("JI between SGA (intermediate confidence) and PPI") +
+  theme_light() +
+  theme(plot.title = element_text(size=15))
+
+gene_level %>% 
+  dplyr::filter(JI_SGA_inter != 0) %>% 
+  ggplot( aes(x=JI_SGA_inter*100)) +
+  geom_histogram(binwidth = 1, color='#333233', fill='#9779c7', alpha=0.8) +
+  ggtitle("JI between SGA (intermediate confidence) and PPI without 0") +
+  theme_light() +
+  theme(plot.title = element_text(size=15))
+```
+
+## Hex-plots to estimate the correlation between the number of interactions and JI
+### Pre-processing data
+```{r}
+PSN_02_JI_cor <- unique(costanzo_gene_names$ENTREZID)  %>%
+  as.data.table()
+
+names(PSN_02_JI_cor) <- 'Gene'
+
+PSN_02_JI_cor <- PSN_02_JI_cor %>% 
+  mutate(JI = sapply(Gene, function(x)
+    ((sum(common_GI_PPI_02$ENTREZID_1 == x) +
+        sum(common_GI_PPI_02$ENTREZID_2 == x)) / 
+       (sum(union_PSN_02$ENTREZID_1 == x) +
+          sum(union_PSN_02$ENTREZID_2 == x))))) %>% 
+  mutate(PPI_n = sapply(Gene, function(x)
+    (sum(PPI$ENTREZID_1 == x) + 
+       sum(PPI$ENTREZID_2 == x)))) %>% 
+  mutate(GI_n = sapply(Gene, function(x)
+    (sum(costanzo_02$ENTREZID_1 == x) + 
+       sum(costanzo_02$ENTREZID_2 == x)))) 
+  
+```
+
+### Plots
+
+```{r}
+ggplot(PSN_02_JI_cor, aes(x=JI, y=PPI_n) ) +
+  geom_hex() +
+  theme_light() 
+
+ggplot(PSN_02_JI_cor, aes(x=JI, y=GI_n) ) +
+  geom_hex() +
+  theme_light()
+```
+
+# Enrichment analysis - Yeast
+lowest (Jaccard = 0 AND PPI_n >= 5 AND GI_n >= 5)
+highest - top 100 by JI
+```{r}
+annotate_data_highest <- PSN_02_JI_cor %>% 
+  dplyr::arrange(desc(JI)) %>% 
+  dplyr::slice(1:100)
+
+annotate_data_lowest <- PSN_02_JI_cor %>% 
+  dplyr::filter(JI == 0) %>% 
+  dplyr::filter(PPI_n >= 23) %>% 
+  dplyr::filter(GI_n >= 23)
+
+#universe for lowest
+annotate_data_23 <- PSN_02_JI_cor %>% 
+  dplyr::filter(PPI_n >= 23) %>% 
+  dplyr::filter(GI_n >= 23)
+  
+ego <- enrichGO(annotate_data$Gene, org.Sc.sgd.db, ont = "ALL")
+
+ego_lowest <- enrichGO(annotate_data_lowest$Gene, org.Sc.sgd.db, ont = "ALL")
+
+ego_uni <- enrichGO(annotate_data_lowest$Gene, org.Sc.sgd.db, 
+                    ont = "ALL", universe = annotate_data_23$Gene)
+
+ego_highest <- enrichGO(annotate_data_highest$Gene, org.Sc.sgd.db, ont = "ALL")
+```
+
+## Plots for lowest against universe
+
+```{r  out.width = "100%"}
+dotplot(ego_uni, split="ONTOLOGY", showCategory = 15, font.size = 8) + 
+  facet_grid(ONTOLOGY~., scale="free")
+
+barplot(ego_uni, showCategory = 15, font.size = 8)
+```
+
+## Plots for highest
+
+```{r out.width = "100%"}
+dotplot(ego_highest, split="ONTOLOGY", showCategory = 15) + 
+  facet_grid(ONTOLOGY~., scale="free") 
+
+barplot(ego_highest)
+```
+
+
+## Plots for lowest
+
+```{r out.width = "100%"}
+dotplot(ego_lowest, split="ONTOLOGY", showCategory = 15) + 
+  facet_grid(ONTOLOGY~., scale="free") 
+
+barplot(ego_lowest)
+```
+
+## Plots for top-100 genes by JI after filter n
+
+Try running enrichment analysis for genes with highest JI by first taking genes with (GI_n >= AND PPI_n >= some cutoff). After filtering by GI_n and PPI_n, take top-100 genes by JI and show their lowest JI value (i.e., JI for the gene ranked 100th);
+
+```{r}
+annotate_data_topgenes <- PSN_02_JI_cor %>% 
+  dplyr::filter(PPI_n >= 23) %>% 
+  dplyr::filter(GI_n >= 23) %>%
+  dplyr::arrange(desc(JI)) %>%
+  dplyr::slice(1:100)
+
+annotate_data_all <- PSN_02_JI_cor 
+  
+#universe with n >= 23
+ego_23 <- enrichGO(annotate_data_topgenes$Gene, org.Sc.sgd.db, 
+                   ont = "ALL", universe = annotate_data_23$Gene)
+#universe with any n
+ego_all <- enrichGO(annotate_data_topgenes$Gene, org.Sc.sgd.db, 
+                    ont = "ALL", universe = annotate_data_all$Gene)
+```
+
+plots for universe with n >= 23
+```{r}
+dotplot(ego_23, split="ONTOLOGY", showCategory = 15) + 
+  facet_grid(ONTOLOGY~., scale="free") 
+
+barplot(ego_23)
+```
+plots for universe - all genes
+```{r}
+dotplot(ego_all, split="ONTOLOGY", showCategory = 15) + 
+  facet_grid(ONTOLOGY~., scale="free") 
+
+barplot(ego_all)
+```
+
+# Destribution of interaction number
+
+```{r}
+top100JI <- PSN_02_JI_cor %>% 
+      dplyr::arrange(desc(JI)) %>% 
+      dplyr::slice(1:100)
+
+destr_inter <- PSN_02_JI_cor %>% 
+  inner_join(CX) %>% 
+  dplyr::arrange(desc(JI)) %>% 
+  dplyr::select(Gene, GI_n, PPI_n) %>%  
+  dplyr::mutate(GI_n_topJI = ifelse(
+    Gene %in% top100JI$Gene, GI_n, NA), 
+    PPI_n_topJI = ifelse(
+      Gene %in% top100JI$Gene, PPI_n, NA)
+    ) %>% 
+  pivot_longer(cols=c('GI_n', 'PPI_n', 
+                      'GI_n_topJI', 'PPI_n_topJI')) %>% 
+  dplyr::filter(value < 200) %>% 
+  dplyr::rename(n = value)
+  
+ggplot(destr_inter, aes(x=name, y=n)) +
+    geom_violin(width=1.4) +
+    geom_boxplot(width=0.1, alpha=0.2) +
+  theme_bw()
+```
+
+## Common PPI PSN and GI PSN
+```{r}
+common_GI_PPI_PSN <- inner_join(costanzo_02, ppi_ji_01, ppi_ji_01 %>% 
+                                 dplyr::mutate(A = ENTREZID_2,
+                                               B = ENTREZID_1,
+                                               ENTREZID_1 = A,
+                                               ENTREZID_2 = B),   
+                                 by=c('ENTREZID_1', 
+                                      'ENTREZID_2'))
+
+common_GI_PPI_PSN <- remove_duplicate(common_GI_PPI_PSN)
+```
+
+## CX
+### Overlap between GI, PPI and CX
+```{r}
+CX_GI.PSN <- inner_join(costanzo_02, CX, 
+                               CX %>% 
+                                 dplyr::mutate(A = ENTREZID_2,
+                                               B = ENTREZID_1,
+                                               ENTREZID_1 = A,
+                                               ENTREZID_2 = B),   
+                                 by=c('ENTREZID_1', 
+                                      'ENTREZID_2')) %>% 
+  unique() %>%
+  dplyr::arrange(desc(Score.x))
+
+CX_PPI <- inner_join(CX, PPI, PPI %>% 
+                                 dplyr::mutate(A = ENTREZID_2,
+                                               B = ENTREZID_1,
+                                               ENTREZID_1 = A,
+                                               ENTREZID_2 = B),   
+                                 by=c('ENTREZID_1', 
+                                      'ENTREZID_2')) %>% 
+  unique() %>%
+  dplyr::arrange(desc(Score))
+
+CX_GI_PPI <- inner_join(CX_GI.PSN, CX_PPI, 
+                               CX_PPI %>% 
+                                 dplyr::mutate(A = ENTREZID_2,
+                                               B = ENTREZID_1,
+                                               ENTREZID_1 = A,
+                                               ENTREZID_2 = B),   
+                                 by=c('ENTREZID_1', 
+                                      'ENTREZID_2')) %>% 
+  unique() 
+```
+
+### JI
+```{r}
+union_CX_3netw <- dplyr::union(costanzo_02[,c(1,2)], PPI) %>% 
+  dplyr::union(CX[,c(1,2)])
+
+union_CX_3netw <- remove_duplicate(union_CX_3netw)
+
+
+#stats (JI and OI)
+CX_JI <- CX_GI_PPI[,1]  %>% 
+  rbind(CX_GI_PPI[,2], use.names = F) %>% 
+  unique() %>% 
+  mutate(OI = sapply(ENTREZID_1, function(x)
+                             ((sum(CX_GI_PPI$ENTREZID_1 == x) +
+                             sum(CX_GI_PPI$ENTREZID_2 == x)) / 
+                               (sum(PPI_uniq$ENTREZID_1 == x) +
+                                  sum(PPI_uniq$ENTREZID_2  == x))))) %>% 
+  mutate(JI = sapply(ENTREZID_1, function(x)
+                             ((sum(CX_GI_PPI$ENTREZID_1 == x) +
+                             sum(CX_GI_PPI$ENTREZID_2 == x)) / 
+                               (sum(union_CX_3netw$ENTREZID_1 == x) +
+                                  sum(union_CX_3netw$ENTREZID_2 == x))))) 
+#plots about stats
+ggplot(CX_JI, aes(x=OI*100)) +
+  geom_histogram(binwidth = 1, color='#333233', fill='#9779c7', alpha=0.8) +
+  ggtitle("OI between 3 networks in %") +
+  theme_light() +
+  theme(plot.title = element_text(size=15))
+
+ggplot(CX_JI, aes(x=JI*100)) +
+  geom_histogram(binwidth = 1, color='#333233', fill='#9779c7', alpha=0.8) +
+  ggtitle("JI between 3 networks in %") +
+  theme_light() +
+  theme(plot.title = element_text(size=15))
+```
+## Enrichment
+against universe
+```{r}
+annotate_3netw <- CX_JI
+names(annotate_3netw)[1] <- 'Gene'
+
+ego_3netw <- enrichGO(annotate_3netw$Gene, 
+                      universe = annotate_data_all$Gene, 
+                      org.Sc.sgd.db, ont = "ALL")
+
+dotplot(ego_3netw, split="ONTOLOGY", showCategory = 8) + 
+  facet_grid(ONTOLOGY~., scale="free") 
+
+barplot(ego_3netw)
+```
+
+without universe
+```{r}
+ego_3netw <- enrichGO(annotate_3netw$Gene, 
+                      org.Sc.sgd.db, ont = "ALL")
+
+dotplot(ego_3netw, split="ONTOLOGY", showCategory = 7) + 
+  facet_grid(ONTOLOGY~., scale="free") 
+
+barplot(ego_3netw)
+```
+
+## Violin plots
+the average number of interactions in each network
+```{r}
+allnetw_JI_cor <- unique(costanzo_gene_names$ENTREZID)  %>%
+  as.data.table()
+
+allnetw_JI_cor <- allnetw_JI_cor %>% 
+  mutate(JI = sapply(Gene, function(x)
+    ((sum(CX_GI_PPI$ENTREZID_1 == x) +
+        sum(CX_GI_PPI$ENTREZID_2 == x)) / 
+       (sum(union_CX_3netw$ENTREZID_1 == x) +
+          sum(union_CX_3netw$ENTREZID_2 == x))))) %>% 
+  mutate(PPI_n = sapply(Gene, function(x)
+    (sum(PPI$ENTREZID_1 == x) + 
+       sum(PPI$ENTREZID_2 == x)))) %>% 
+  mutate(GI_n = sapply(Gene, function(x)
+    (sum(costanzo_02$ENTREZID_1 == x) + 
+       sum(costanzo_02$ENTREZID_2 == x)))) %>% 
+  mutate(CX_n = sapply(Gene, function(x)
+    (sum(PPI$ENTREZID_1 == x) + 
+       sum(PPI$ENTREZID_2 == x)))) 
+```
+
+## Prepare for safepy
+```{r}
+CX_GI_PPI %>% 
+  dplyr::select(ENTREZID_1,
+        ENTREZID_2) %>% 
+  dplyr::mutate(n=1) %>% 
+  mutate(A =  mapIds(org.Sc.sgd.db, 
+                            keys = ENTREZID_1, 
+                            column = "SGD", 
+                            keytype = "ENTREZID"),
+         B = mapIds(org.Sc.sgd.db, 
+                            keys = ENTREZID_2, 
+                            column = "SGD", 
+                            keytype = "ENTREZID")) %>% 
+  dplyr::select(A, B, n) %>% 
+  write.table(file='yeast_netwoks.txt',
+            col.names = FALSE, row.names = FALSE, 
+            sep="\t", quote = FALSE)
+```
+
+#Homo sapiens
+## Pre-processing
+```{r}
+human_ppi_biogrid <- human_ppi_biogrid %>% 
+  filter(`Experimental System Type` == 'physical') %>% 
+  dplyr::mutate(ENTREZID_1 = `Entrez Gene Interactor A`,
+                ENTREZID_2 = `Entrez Gene Interactor B`) %>% 
+  dplyr::select(ENTREZID_1, ENTREZID_2) 
+
+human_ppi_biogrid <- remove_duplicate(human_ppi_biogrid)
+
+human_ppi_biogrid$ENTREZID_1 <- as.integer(human_ppi_biogrid$ENTREZID_1)
+human_ppi_biogrid$ENTREZID_2 <- as.integer(human_ppi_biogrid$ENTREZID_2)
+
+
+names(human_gi_net) <- c('ENTREZID_1', 'ENTREZID_2', 'Score')
+
+```
+
+## Interactions
+```{r}
+human_gi_ppi <- inner_join(human_ppi_biogrid, human_gi_net, human_gi_net %>% 
+                             dplyr::mutate(A = ENTREZID_1,
+                                           B = ENTREZID_2,
+                                           ENTREZID_2 = A,
+                                           ENTREZID_1 = B),
+                           by=c('ENTREZID_1', 'ENTREZID_2'))
+
+human_gi_cx <- inner_join(human_cx, human_gi_net, human_gi_net %>% 
+                            dplyr::mutate(A = ENTREZID_1,
+                                          B = ENTREZID_2,
+                                          ENTREZID_2 = A,
+                                          ENTREZID_1 = B),
+                          by=c('ENTREZID_1', 'ENTREZID_2'))
+
+human_ppi_cx <- inner_join(human_cx, human_ppi_biogrid, human_ppi_biogrid %>% 
+                             dplyr::mutate(A = ENTREZID_1,
+                                           B = ENTREZID_2,
+                                           ENTREZID_2 = A,
+                                           ENTREZID_1 = B),
+                           by=c('ENTREZID_1', 'ENTREZID_2'))
+
+human_gi_ppi_cx <- inner_join(human_gi_cx, human_ppi_biogrid, human_ppi_biogrid %>% 
+                                dplyr::mutate(A = ENTREZID_1,
+                                              B = ENTREZID_2,
+                                              ENTREZID_2 = A,
+                                              ENTREZID_1 = B),
+                              by=c('ENTREZID_1', 'ENTREZID_2'))
+```
+
+## Enrichment
+```{r}
+ego_human <- enrichGO(unique(c(human_gi_ppi_cx$ENTREZID_1,
+                               human_gi_ppi_cx$ENTREZID_2)),
+                      org.Hs.eg.db, ont = "ALL")
+
+dotplot(ego_human, split="ONTOLOGY", showCategory = 7) + 
+  facet_grid(ONTOLOGY~., scale="free") 
+```
+
+## for safepy
+```{r}
+human_gi_ppi_cx %>% 
+  dplyr::mutate(n = 1) %>% 
+  mutate(A =  mapIds(org.Hs.eg.db, 
+                            keys = as.character(ENTREZID_1), 
+                            column = "UNIPROT", 
+                            keytype = "ENTREZID"),
+         B = mapIds(org.Hs.eg.db, 
+                            keys = as.character(ENTREZID_2), 
+                            column = "UNIPROT", 
+                            keytype = "ENTREZID")) %>% 
+  dplyr::select(A, B, n) %>% 
+  write.table(file='human_another_netwoks.txt',
+            col.names = FALSE, row.names = FALSE, 
+            sep="\t", quote = FALSE)
+```
+
+# GeneMANIA
+## H. sapiens 
+### Pre-processing
+```{r}
+#GI
+#gene name to ENTREZID
+human_gi <- human_gi %>% 
+  mutate(ENTREZID_1 =  mapIds(org.Hs.eg.db, 
+                              keys = Gene_A, 
+                              column = "ENTREZID", 
+                              keytype = "UNIPROT")) %>% 
+  mutate(ENTREZID_2 =  mapIds(org.Hs.eg.db, 
+                              keys = Gene_B, 
+                              column = "ENTREZID", 
+                              keytype = "UNIPROT")) %>% 
+  dplyr::select(ENTREZID_1, ENTREZID_2, Weight) %>% 
+  drop_na()
+
+#PPI
+#gene name to ENTREZID
+human_ppi <- human_ppi %>% 
+  mutate(ENTREZID_1 =  mapIds(org.Hs.eg.db, 
+                              keys = Gene_A, 
+                              column = "ENTREZID", 
+                              keytype = "UNIPROT")) %>% 
+  mutate(ENTREZID_2 =  mapIds(org.Hs.eg.db, 
+                              keys = Gene_B, 
+                              column = "ENTREZID", 
+                              keytype = "UNIPROT")) %>% 
+  dplyr::select(ENTREZID_1, ENTREZID_2, Weight) %>% 
+  drop_na()
+
+#CX
+#gene name to ENTREZID
+human_cx <- human_cx %>% 
+  mutate(ENTREZID_1 =  mapIds(org.Hs.eg.db, 
+                              keys = Gene_A, 
+                              column = "ENTREZID", 
+                              keytype = "UNIPROT")) %>% 
+  mutate(ENTREZID_2 =  mapIds(org.Hs.eg.db, 
+                              keys = Gene_B, 
+                              column = "ENTREZID", 
+                              keytype = "UNIPROT")) %>% 
+  dplyr::select(ENTREZID_1, ENTREZID_2, Weight) %>% 
+  drop_na()
+```
+
+### Interactions
+```{r}
+human_gi_ppi_GM <- inner_join(human_ppi, human_gi, human_gi %>% 
+                             dplyr::mutate(A = ENTREZID_1,
+                                           B = ENTREZID_2,
+                                           ENTREZID_2 = A,
+                                           ENTREZID_1 = B),
+                           by=c('ENTREZID_1', 'ENTREZID_2'))
+
+human_gi_cx_GM <- inner_join(human_cx, human_gi, human_gi %>% 
+                            dplyr::mutate(A = ENTREZID_1,
+                                          B = ENTREZID_2,
+                                          ENTREZID_2 = A,
+                                          ENTREZID_1 = B),
+                          by=c('ENTREZID_1', 'ENTREZID_2'))
+
+human_ppi_cx_GM <- inner_join(human_cx, human_ppi, human_ppi %>% 
+                             dplyr::mutate(A = ENTREZID_1,
+                                           B = ENTREZID_2,
+                                           ENTREZID_2 = A,
+                                           ENTREZID_1 = B),
+                           by=c('ENTREZID_1', 'ENTREZID_2'))
+
+human_gi_ppi_cx_GM <- inner_join(human_gi_cx_GM, human_ppi, human_ppi %>% 
+                                dplyr::mutate(A = ENTREZID_1,
+                                              B = ENTREZID_2,
+                                              ENTREZID_2 = A,
+                                              ENTREZID_1 = B),
+                              by=c('ENTREZID_1', 'ENTREZID_2'))
+
+human_gi_ppi_cx_GM <- remove_duplicate(human_gi_ppi_cx_GM)
+
+human_counts <- data.frame(network = c('gi', 'ppi', 'cx'),
+                           count = c(nrow(human_gi), nrow(human_ppi), nrow(human_cx)))
+```
+
+### Enrichment
+```{r}
+ego_human <- enrichGO(unique(c(human_gi_ppi_cx_GM$ENTREZID_1, human_gi_ppi_cx_GM$ENTREZID_2)),
+                      org.Hs.eg.db, ont = "ALL")
+
+dotplot(ego_human, split="ONTOLOGY", showCategory = 8) + 
+  facet_grid(ONTOLOGY~., scale="free") 
+
+barplot(ego_human)
+```
+
+### For safepy
+```{r}
+human_gi_ppi_cx_GM %>% 
+  dplyr::mutate(n = 1) %>% 
+  mutate(A =  mapIds(org.Hs.eg.db, 
+                            keys = as.character(ENTREZID_1), 
+                            column = "UNIPROT", 
+                            keytype = "ENTREZID"),
+         B = mapIds(org.Hs.eg.db, 
+                            keys = as.character(ENTREZID_2), 
+                            column = "UNIPROT", 
+                            keytype = "ENTREZID")) %>% 
+  dplyr::select(A, B, n) %>% 
+  write.table(file='human_netwoks.txt',
+            col.names = FALSE, row.names = FALSE, 
+            sep="\t", quote = FALSE)
+```
+
+## S. cerevisiae
+### Pre-processing
+gene name to ENTREZID
+```{r}
+yeast_cx <- yeast_cx %>% 
+  mutate(ENTREZID_1 =  mapIds(org.Sc.sgd.db, 
+                              keys = Gene_A, 
+                              column = "ENTREZID", 
+                              keytype = "ENSEMBL")) %>% 
+  mutate(ENTREZID_2 =  mapIds(org.Sc.sgd.db, 
+                              keys = Gene_B, 
+                              column = "ENTREZID", 
+                              keytype = "ENSEMBL")) %>% 
+  dplyr::select(ENTREZID_1, ENTREZID_2, Weight) %>% 
+  drop_na()
+
+
+yeast_gi <- yeast_gi %>% 
+  mutate(ENTREZID_1 =  mapIds(org.Sc.sgd.db, 
+                              keys = Gene_A, 
+                              column = "ENTREZID", 
+                              keytype = "ENSEMBL")) %>% 
+  mutate(ENTREZID_2 =  mapIds(org.Sc.sgd.db, 
+                              keys = Gene_B, 
+                              column = "ENTREZID", 
+                              keytype = "ENSEMBL")) %>% 
+  dplyr::select(ENTREZID_1, ENTREZID_2, Weight) %>% 
+  drop_na()
+
+
+yeast_ppi <- yeast_ppi %>% 
+  mutate(ENTREZID_1 =  mapIds(org.Sc.sgd.db, 
+                              keys = Gene_A, 
+                              column = "ENTREZID", 
+                              keytype = "ENSEMBL")) %>% 
+  mutate(ENTREZID_2 =  mapIds(org.Sc.sgd.db, 
+                              keys = Gene_B, 
+                              column = "ENTREZID", 
+                              keytype = "ENSEMBL")) %>% 
+  dplyr::select(ENTREZID_1, ENTREZID_2, Weight) %>% 
+  drop_na()
+```
+
+### Interactions
+```{r}
+yeast_gi_ppi <- inner_join(yeast_ppi, yeast_gi, yeast_gi %>% 
+                             dplyr::mutate(A = ENTREZID_1,
+                                           B = ENTREZID_2,
+                                           ENTREZID_2 = A,
+                                           ENTREZID_1 = B),
+                           by=c('ENTREZID_1', 'ENTREZID_2'))
+
+yeast_gi_cx <- inner_join(yeast_cx, yeast_gi, yeast_gi %>% 
+                            dplyr::mutate(A = ENTREZID_1,
+                                          B = ENTREZID_2,
+                                          ENTREZID_2 = A,
+                                          ENTREZID_1 = B),
+                          by=c('ENTREZID_1', 'ENTREZID_2'))
+
+yeast_ppi_cx <- inner_join(yeast_cx, yeast_ppi, yeast_ppi %>% 
+                             dplyr::mutate(A = ENTREZID_1,
+                                           B = ENTREZID_2,
+                                           ENTREZID_2 = A,
+                                           ENTREZID_1 = B),
+                           by=c('ENTREZID_1', 'ENTREZID_2'))
+
+yeast_gi_ppi_cx <- inner_join(yeast_gi_cx, yeast_ppi, yeast_ppi %>% 
+                                dplyr::mutate(A = ENTREZID_1,
+                                              B = ENTREZID_2,
+                                              ENTREZID_2 = A,
+                                              ENTREZID_1 = B),
+                              by=c('ENTREZID_1', 'ENTREZID_2'))
+
+
+yeast_gi_ppi_cx <- remove_duplicate(yeast_gi_ppi_cx)
+
+yeast_counts <- data.frame(network = c('gi', 'ppi', 'cx'),
+                           count = c(nrow(yeast_gi), nrow(yeast_ppi), nrow(yeast_cx)))
+```
+
+### Filter from costanzo
+```{r}
+#filter
+yeast_gi_ppi_cx_filter <- yeast_gi_ppi_cx %>% 
+  subset(paste0(ENTREZID_1, ENTREZID_2) %in% 
+            c(paste0(costanzo_02$ENTREZID_1, costanzo_02$ENTREZID_2),
+              paste0(costanzo_02$ENTREZID_2, costanzo_02$ENTREZID_1)))
+```
+
+#### Enrichment
+```{r}
+#agains universe - all common genes in genemania
+ego_yeast <- enrichGO(unique(c(yeast_gi_ppi_cx_filter$ENTREZID_1, yeast_gi_ppi_cx_filter$ENTREZID_2)),
+                      org.Sc.sgd.db,
+                      universe = as.character(unique(c(yeast_gi_ppi_cx_filter$ENTREZID_1,
+                                          yeast_gi_ppi_cx_filter$ENTREZID_2,
+                                          yeast_gi_ppi_cx$ENTREZID_1,
+                                          yeast_gi_ppi_cx$ENTREZID_2),  
+                                          ont = "ALL")))
+
+dotplot(ego_yeast, split="ONTOLOGY", showCategory = 8) + 
+  facet_grid(ONTOLOGY~., scale="free") 
+
+barplot(ego_yeast)
+```
+
+### for safepy
+```{r}
+yeast_gi_ppi_cx %>% 
+  dplyr::mutate(n = 1) %>%
+  mutate(A =  mapIds(org.Sc.sgd.db, 
+                            keys = as.character(ENTREZID_1), 
+                            column = "SGD", 
+                            keytype = "ENTREZID"),
+         B = mapIds(org.Sc.sgd.db, 
+                            keys = as.character(ENTREZID_2), 
+                            column = "SGD", 
+                            keytype = "ENTREZID")) %>% 
+  dplyr::select(A, B, n) %>% 
+  write.table(file='yeast_gm_netwoks.txt',
+            col.names = FALSE, row.names = FALSE, 
+            sep="\t", quote = FALSE)
+
+yeast_gi_ppi_cx_filter %>% 
+  dplyr::mutate(n = 1) %>%
+  mutate(A =  mapIds(org.Sc.sgd.db, 
+                            keys = as.character(ENTREZID_1), 
+                            column = "SGD", 
+                            keytype = "ENTREZID"),
+         B = mapIds(org.Sc.sgd.db, 
+                            keys = as.character(ENTREZID_2), 
+                            column = "SGD", 
+                            keytype = "ENTREZID")) %>% 
+  dplyr::select(A, B, n) %>% 
+  write.table(file='yeast_filter_networks.txt',
+            col.names = FALSE, row.names = FALSE, 
+            sep="\t", quote = FALSE)
+```
+
+
+
+## Violin plots
+the average number of interactions in each network
+### Yeast
+```{r}
+#GeneMANIA
+gene_names_yeast <- unique(c(yeast_gi$ENTREZID_1, yeast_gi$ENTREZID_2, 
+                             yeast_cx$ENTREZID_1, yeast_cx$ENTREZID_2,
+                             yeast_ppi$ENTREZID_1, yeast_ppi$ENTREZID_2)) %>% 
+  as.data.table()
+
+names(gene_names_yeast) <- 'Gene'
+
+#all genes in genemania
+yeast_GM_gene_level_all <- gene_names_yeast  %>% 
+  mutate(CX_all = sapply(Gene, function(x)
+                             ((sum(yeast_cx$ENTREZID_1 == x) +
+                             sum(yeast_cx$ENTREZID_2 == x))))) %>% 
+  mutate(GI_all = sapply(Gene, function(x)
+                             ((sum(yeast_gi$ENTREZID_1 == x) +
+                             sum(yeast_gi$ENTREZID_2 == x))))) %>% 
+  mutate(PPI_all = sapply(Gene, function(x)
+                             ((sum(yeast_ppi$ENTREZID_1 == x) +
+                             sum(yeast_ppi$ENTREZID_2 == x))))) %>% 
+  pivot_longer(cols=c('CX_all', 'GI_all', 
+                      'PPI_all')) %>% 
+  dplyr::rename(n = value)
+
+#genes from common interactions from genemania
+yeast_GM_gene_level_common <- unique(c(yeast_gi_ppi_cx$ENTREZID_1, yeast_gi_ppi_cx$ENTREZID_2)) %>% 
+  as.data.table()
+names(yeast_GM_gene_level_common) <- 'Gene'
+yeast_GM_gene_level_common <- yeast_GM_gene_level_common  %>% 
+  mutate(CX_common = sapply(Gene, function(x)
+                             ((sum(yeast_cx$ENTREZID_1 == x) +
+                             sum(yeast_cx$ENTREZID_2 == x))))) %>% 
+  mutate(GI_common = sapply(Gene, function(x)
+                             ((sum(yeast_gi$ENTREZID_1 == x) +
+                             sum(yeast_gi$ENTREZID_2 == x))))) %>% 
+  mutate(PPI_common = sapply(Gene, function(x)
+                             ((sum(yeast_ppi$ENTREZID_1 == x) +
+                             sum(yeast_ppi$ENTREZID_2 == x))))) %>% 
+  pivot_longer(cols=c('CX_common', 'GI_common', 
+                      'PPI_common')) %>% 
+  dplyr::rename(n = value) 
+
+#genes from common interactions with filter from genemania
+yeast_GM_gene_level_common_filter <- unique(c(yeast_gi_ppi_cx_filter$ENTREZID_1,
+                                              yeast_gi_ppi_cx_filter$ENTREZID_2)) %>% 
+  as.data.table()
+names(yeast_GM_gene_level_common_filter) <- 'Gene'
+yeast_GM_gene_level_common_filter <- yeast_GM_gene_level_common_filter  %>% 
+  mutate(CX_common_filter = sapply(Gene, function(x)
+                             ((sum(yeast_cx$ENTREZID_1 == x) +
+                             sum(yeast_cx$ENTREZID_2 == x))))) %>% 
+  mutate(GI_common_filter = sapply(Gene, function(x)
+                             ((sum(yeast_gi$ENTREZID_1 == x) +
+                             sum(yeast_gi$ENTREZID_2 == x))))) %>% 
+  mutate(PPI_common_filter = sapply(Gene, function(x)
+                             ((sum(yeast_ppi$ENTREZID_1 == x) +
+                             sum(yeast_ppi$ENTREZID_2 == x))))) %>% 
+  pivot_longer(cols=c('CX_common_filter', 'GI_common_filter', 
+                      'PPI_common_filter')) %>% 
+  dplyr::rename(n = value)
+
+#combine table
+yeast_GM_metrics <- yeast_GM_gene_level_all %>% 
+  rbind(yeast_GM_gene_level_common) %>% 
+  rbind(yeast_GM_gene_level_common_filter)
+
+#plot
+ggplot(yeast_GM_metrics, aes(x=name, y=n)) +
+    geom_violin(width=1.4) +
+    geom_boxplot(width=0.1, alpha=0.2) +
+  theme_bw()
+
+```
+
+
+```{r}
+#different databases
+gene_names_yeast <- unique(costanzo_gene_names$ENTREZID)  %>%
+  as.data.table()
+
+names(gene_names_yeast) <- 'Gene'
+
+#all genes
+yeast_gene_level_all <- gene_names_yeast  %>% 
+  mutate(CX_all = sapply(Gene, function(x)
+                             ((sum(CX$ENTREZID_1 == x) +
+                             sum(CX$ENTREZID_2 == x))))) %>% 
+  mutate(GI_all = sapply(Gene, function(x)
+                             ((sum(costanzo_02$ENTREZID_1 == x) +
+                             sum(costanzo_02$ENTREZID_2 == x))))) %>% 
+  mutate(PPI_all = sapply(Gene, function(x)
+                             ((sum(PPI$ENTREZID_1 == x) +
+                             sum(PPI$ENTREZID_2 == x))))) %>% 
+  pivot_longer(cols=c('CX_all', 'GI_all', 
+                      'PPI_all')) %>% 
+  dplyr::rename(n = value)
+
+#genes from common interactions
+yeast_gene_level_common <- unique(c(CX_GI_PPI$ENTREZID_1,
+                                    CX_GI_PPI$ENTREZID_2)) %>% 
+  as.data.table()
+names(yeast_gene_level_common) <- 'Gene'
+yeast_gene_level_common <- yeast_gene_level_common  %>% 
+  mutate(CX_common = sapply(Gene, function(x)
+                             ((sum(CX$ENTREZID_1 == x) +
+                             sum(CX$ENTREZID_2 == x))))) %>% 
+  mutate(GI_common = sapply(Gene, function(x)
+                             ((sum(costanzo_02$ENTREZID_1 == x) +
+                             sum(costanzo_02$ENTREZID_2 == x))))) %>% 
+  mutate(PPI_common = sapply(Gene, function(x)
+                             ((sum(PPI$ENTREZID_1 == x) +
+                             sum(PPI$ENTREZID_2 == x))))) %>% 
+  pivot_longer(cols=c('CX_common', 'GI_common', 
+                      'PPI_common')) %>% 
+  dplyr::rename(n = value) 
+
+#combine tables
+yeast_metrics <- yeast_gene_level_all %>% 
+  rbind(yeast_gene_level_common) 
+
+#plot
+ggplot(yeast_metrics, aes(x=name, y=n)) +
+    geom_violin(width=1.4) +
+    geom_boxplot(width=0.1, alpha=0.2) +
+  theme_bw()
+
+```
+
+### Human
+```{r}
+#different databases
+
+#the number of interactions for each gene
+ppi_count_human <- table(human_ppi_biogrid$ENTREZID_1) %>% 
+  as.data.table() %>% 
+  bind_rows(as.data.table(table(human_ppi_biogrid$ENTREZID_2))) %>%
+    group_by(V1) %>%
+    summarise_all(funs(sum(N, na.rm = TRUE)))
+ppi_count_human$V1 <- as.integer(ppi_count_human$V1)
+names(ppi_count_human) <- c('Gene', 'PPI')
+
+gi_count_human <- table(human_gi_net$ENTREZID_1) %>% 
+  as.data.table() %>% 
+  bind_rows(as.data.table(table(human_gi_net$ENTREZID_2))) %>%
+    group_by(V1) %>%
+    summarise_all(funs(sum(N, na.rm = TRUE)))
+gi_count_human$V1 <- as.integer(gi_count_human$V1)
+names(gi_count_human) <- c('Gene', 'GI')
+
+cx_count_human <- table(human_cx$ENTREZID_1) %>% 
+  as.data.table() %>% 
+  bind_rows(as.data.table(table(human_cx$ENTREZID_2))) %>%
+    group_by(V1) %>%
+    summarise_all(funs(sum(N, na.rm = TRUE)))
+cx_count_human$V1 <- as.integer(cx_count_human$V1)
+names(cx_count_human) <- c('Gene', 'CX')
+
+#combine tables
+human_gene_level_all <- merge(ppi_count_human, gi_count_human, by = 'Gene', all = T) %>% 
+  merge(cx_count_human, by = 'Gene', all = T)
+human_gene_level_all[is.na(human_gene_level_all)] <- 0
+
+#genes from common interactions
+human_gene_level_common <- unique(c(human_gi_ppi_cx$ENTREZID_1, human_gi_ppi_cx$ENTREZID_2))
+human_gene_level_common <- human_gene_level_all[human_gene_level_all$Gene 
+                                                      %in% human_gene_level_common, ]
+names(human_gene_level_all) <- c('Gene', 'PPI_all', 'GI_all', 'CX_all')
+names(human_gene_level_common) <- c('Gene', 'PPI_common', 'GI_common', 'CX_common')
+
+#combine all tables 
+human_metrics <- human_gene_level_all %>% 
+  pivot_longer(cols=c('CX_all', 'GI_all', 
+                      'PPI_all')) %>% 
+  dplyr::rename(n = value) %>% 
+  rbind(human_gene_level_common %>% 
+          pivot_longer(cols=c('CX_common', 'GI_common', 
+                      'PPI_common')) %>% 
+          dplyr::rename(n = value) )
+
+#plot
+ggplot(human_metrics, aes(x=name, y=n)) +
+    geom_violin(width=1.4) +
+    geom_boxplot(width=0.1, alpha=0.2) +
+  theme_bw()
+```
+
+```{r}
+#GeneMANIA
+ppi_count_human_GM <- table(human_ppi$ENTREZID_1) %>% 
+  as.data.table() %>% 
+  bind_rows(as.data.table(table(human_ppi$ENTREZID_2))) %>%
+    group_by(V1) %>%
+    summarise_all(funs(sum(N, na.rm = TRUE)))
+ppi_count_human_GM$V1 <- as.integer(ppi_count_human_GM$V1)
+names(ppi_count_human_GM) <- c('Gene', 'PPI')
+
+gi_count_human_GM <- table(human_gi$ENTREZID_1) %>% 
+  as.data.table() %>% 
+  bind_rows(as.data.table(table(human_gi$ENTREZID_2))) %>%
+    group_by(V1) %>%
+    summarise_all(funs(sum(N, na.rm = TRUE)))
+gi_count_human_GM$V1 <- as.integer(gi_count_human_GM$V1)
+names(gi_count_human_GM) <- c('Gene', 'GI')
+
+cx_count_human_GM <- table(human_cx$ENTREZID_1) %>% 
+  as.data.table() %>% 
+  bind_rows(as.data.table(table(human_cx$ENTREZID_2))) %>%
+    group_by(V1) %>%
+    summarise_all(funs(sum(N, na.rm = TRUE)))
+cx_count_human_GM$V1 <- as.integer(cx_count_human_GM$V1)
+names(cx_count_human_GM) <- c('Gene', 'CX')
+
+#c
+human_gene_level_all_GM <- merge(ppi_count_human_GM, gi_count_human_GM, by = 'Gene', all = T) %>% 
+  merge(cx_count_human_GM, by = 'Gene', all = T)
+human_gene_level_all_GM[is.na(human_gene_level_all_GM)] <- 0
+
+#genes rom common interactions
+human_gene_level_common_GM <- unique(c(human_gi_ppi_cx$ENTREZID_1, human_gi_ppi_cx$ENTREZID_2))
+human_gene_level_common_GM <- human_gene_level_all_GM[human_gene_level_all_GM$Gene 
+                                                      %in% human_gene_level_common_GM, ]
+names(human_gene_level_all_GM) <- c('Gene', 'PPI_all', 'GI_all', 'CX_all')
+names(human_gene_level_common_GM) <- c('Gene', 'PPI_common', 'GI_common', 'CX_common')
+
+#merge all tables
+human_metrics_GM <- human_gene_level_all_GM %>% 
+  pivot_longer(cols=c('CX_all', 'GI_all', 
+                      'PPI_all')) %>% 
+  dplyr::rename(n = value) %>% 
+  rbind(human_gene_level_common_GM %>% 
+          pivot_longer(cols=c('CX_common', 'GI_common', 
+                      'PPI_common')) %>% 
+          dplyr::rename(n = value) )
+
+#plot
+ggplot(human_metrics_GM, aes(x=name, y=n)) +
+    geom_violin(width=1.4) +
+    geom_boxplot(width=0.1, alpha=0.2) +
+  theme_bw()
+```
+
