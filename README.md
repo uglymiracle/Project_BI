@@ -55,7 +55,3 @@ We also performed a similar analysis on data from the GeneMANIA database, which 
 
 In conclusion, the processes that sustain a living cell and are necessary for survival require coordinated work on all three layers for both single-celled and multicellular organisms.
 
-
-```python
-
-```
