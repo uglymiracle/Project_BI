@@ -18,6 +18,8 @@ The basic analysis code is presented in `analysis.Rmd`. The code contains the in
 
 Please note that the code contains the download of all the required files and these files take about 7-8 GB. Also, processing this data involves removing duplicates, which takes quite a long time. 
 
+Python==3.9.16
+
 Graph illustration and clustering is done by the [safepy](https://github.com/baryshnikova-lab/safepy) tool which is still in development. In this regard, its installation is possible only manually by the following steps: 
 
 ```
@@ -37,7 +39,7 @@ For yeast, data were obtained from databases such as [TheCellMap](https://thecel
 
 
 ## Results
-For each organism, we obtained an intersection of all layers and identified 462 interactions common to all 3 networks for yeast, represented by 317 genes, and 2203 interactions for humans, represented by 1253 genes.
+For each organism, we obtained an intersection of all layers and identified 462 interactions common to all 3 networks for yeast, represented by 317 genes, and 2203 interactions for humans, represented by 1253 genes. For the yeast, the cutoffs were taken from [Costanzo, 2016.](https://www.science.org/doi/10.1126/science.aaf1420)
 
 ![intersection](images/intersections.png)
 
@@ -49,7 +51,9 @@ The results of the enrichment analysis for human genes were similar. However, in
 
 ![enr_human](images/enrichment_human.png)
 
-We also performed a similar analysis on data from the GeneMANIA database, which includes the results of a large number of studies, in addition to data from screening studies. As a result, we obtained 13569 common interactions for humans, represented by 6814 genes, and 22141 common interactions for yeast, involving 4190 genes. Enrichment analysis on these networks led to the same results, which further confirms our conclusions.
+We also performed a similar analysis on data from the GeneMANIA database, which includes the results of a large number of studies, in addition to data from screening studies. As a result, we obtained 13569 common interactions for humans, represented by 6814 genes, and 22141 common interactions for yeast, involving 4190 genes. Enrichment analysis on these networks led to the same results, which further confirms our conclusions. 
+
+For a more detailed study of the processes in which the found genes are involved, a clustering by GO terms was performed (script [safepy_script.ipynb](https://github.com/uglymiracle/Project_BI/blob/main/safepy_script.ipynb)). Thanks to this clustering, we were able to see the minor groups as well.
 
 ![intersection_gm](images/intersections_gm.png)
 
